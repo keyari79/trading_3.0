@@ -1,0 +1,280 @@
+//@version=6
+indicator("SIGNAL Decision Panel + Session Tracker", overlay=true, max_bars_back=500)
+
+// ============================================================================
+// INPUTS - Display & Configuration
+// ============================================================================
+
+// Table Settings
+tablePos = input.string("top_left", "Panel Position", options=["top_left", "top_right", "middle_left", "middle_right"], group="Display")
+tableTextSize = input.string("small", "Text Size", options=["tiny", "small", "normal"], group="Display")
+showLegend = input.bool(false, "Show Info Panel", group="Display")
+
+// Direction Selection
+tradeDirection = input.string("LONG", "Trade Direction", options=["LONG", "SHORT"], group="Signal Settings", tooltip="Select trade direction for signal validation")
+
+// Rejection Candle Criteria Inputs
+minWickRatio = input.float(1.5, "Min Wick:Body Ratio", minval=1.0, step=0.1, group="Rejection Criteria")
+maxBodyPercent = input.float(40.0, "Max Body % of Range", minval=0, maxval=100, step=5, group="Rejection Criteria")
+minBodyPosition = input.float(40.0, "Min Body Position %", minval=0, maxval=100, step=5, group="Rejection Criteria", tooltip="For LONG: body in upper 40%. For SHORT: body in lower 40%")
+minVolumeRatio = input.float(1.5, "Min Volume Ratio", minval=1.0, step=0.1, group="Rejection Criteria")
+
+// Validation Criteria Inputs
+maxSetupAge = input.int(3, "Max Setup Age (bars)", minval=1, group="Validation")
+timeBufferMinutes = input.int(30, "Time Buffer (minutes)", minval=0, group="Validation", tooltip="Minutes before session close to stop entries")
+maxSpreadPips = input.float(3.0, "Max Spread (pips)", minval=0, step=0.5, group="Validation")
+
+// Session Settings
+europeOpen = input.int(8, "Europe Open (UTC)", minval=0, maxval=23, group="Sessions")
+europeClose = input.int(17, "Europe Close (UTC)", minval=0, maxval=23, group="Sessions")
+usOpen = input.int(13, "US Open (UTC)", minval=0, maxval=23, group="Sessions")
+usClose = input.int(21, "US Close (UTC)", minval=0, maxval=23, group="Sessions")
+japanOpen = input.int(0, "Japan Open (UTC)", minval=0, maxval=23, group="Sessions")
+japanClose = input.int(9, "Japan Close (UTC)", minval=0, maxval=23, group="Sessions")
+
+// Alert Settings
+enableAlerts = input.bool(true, "Enable Alerts", group="Alerts")
+
+// ============================================================================
+// HELPER FUNCTIONS
+// ============================================================================
+
+getTextSize(size) =>
+    size == "tiny" ? size.tiny : size == "small" ? size.small : size.normal
+
+f_getTablePosition(pos) =>
+    pos == "top_left" ? position.top_left : pos == "top_right" ? position.top_right : pos == "middle_left" ? position.middle_left : position.middle_right
+
+// ============================================================================
+// SESSION TRACKING
+// ============================================================================
+
+currentHour = hour(time, "UTC")
+currentMinute = minute(time, "UTC")
+
+// Session Detection
+isEurope = (currentHour >= europeOpen and currentHour < europeClose)
+isUS = (currentHour >= usOpen and currentHour < usClose)
+isJapan = (currentHour >= japanOpen and currentHour < japanClose) or (japanClose < japanOpen and (currentHour >= japanOpen or currentHour < japanClose))
+
+// Active Session Label
+activeSession = isEurope and isUS ? "OVERLAP" : isEurope ? "EUROPE" : isUS ? "US" : isJapan ? "JAPAN" : "None"
+
+// Session High/Low Tracking
+var float sessionHigh = na
+var float sessionLow = na
+var bool newSession = false
+
+if isEurope and not isEurope[1]
+    sessionHigh := high
+    sessionLow := low
+    newSession := true
+else if isUS and not isUS[1]
+    sessionHigh := high
+    sessionLow := low
+    newSession := true
+else if isJapan and not isJapan[1]
+    sessionHigh := high
+    sessionLow := low
+    newSession := true
+else
+    if high > sessionHigh
+        sessionHigh := high
+    if low < sessionLow
+        sessionLow := low
+    newSession := false
+
+// Session Strength Assessment
+sessionStrength = activeSession == "OVERLAP" ? "PRIME" : activeSession != "None" ? "ACCEPTABLE" : "WEAK"
+
+// ============================================================================
+// REJECTION CANDLE CRITERIA (8 Checks)
+// ============================================================================
+
+// EMA Calculations
+ema8 = ta.ema(close, 8)
+ema21 = ta.ema(close, 21)
+ema55 = ta.ema(close, 55)
+
+// Candle Measurements
+candleRange = high - low
+candleBody = math.abs(close - open)
+upperWick = high - math.max(open, close)
+lowerWick = math.min(open, close) - low
+
+// 1. Wick-to-Body Ratio
+dominantWick = tradeDirection == "LONG" ? lowerWick : upperWick
+wickBodyRatio = candleBody > 0 ? dominantWick / candleBody : 0
+check1_wickRatio = wickBodyRatio >= minWickRatio
+
+// 2. Dominant Wick Direction
+check2_dominantWick = tradeDirection == "LONG" ? lowerWick > upperWick : upperWick > lowerWick
+
+// 3. Small Body Size
+bodyPercent = candleRange > 0 ? (candleBody / candleRange) * 100 : 0
+check3_bodySize = bodyPercent <= maxBodyPercent
+
+// 4. Body Position
+bodyPosition = candleRange > 0 ? ((math.min(open, close) - low) / candleRange) * 100 : 0
+check4_bodyPosition = tradeDirection == "LONG" ? bodyPosition >= minBodyPosition : bodyPosition <= (100 - minBodyPosition)
+
+// 5. EMA Touch/Pierce
+emaTouch = tradeDirection == "LONG" ? low <= ema21 : high >= ema21
+emaPierce = tradeDirection == "LONG" ? low < ema21 and close > ema21 : high > ema21 and close < ema21
+check5_emaTouch = emaTouch or emaPierce
+
+// 6. Structure Reclaim
+recentSwing = tradeDirection == "LONG" ? ta.lowest(low, 5)[1] : ta.highest(high, 5)[1]
+structureReclaim = tradeDirection == "LONG" ? close > recentSwing : close < recentSwing
+check6_structureReclaim = structureReclaim
+
+// 7. Close Position
+closePosition = candleRange > 0 ? ((close - low) / candleRange) * 100 : 0
+check7_closePosition = tradeDirection == "LONG" ? closePosition >= 50 : closePosition <= 50
+
+// 8. Volume Spike
+volumeAvg = ta.sma(volume, 20)
+volumeRatio = volume / volumeAvg
+check8_volumeSpike = volumeRatio >= minVolumeRatio
+
+// Combined Rejection Candle Score
+rejectionScore = (check1_wickRatio ? 1 : 0) + (check2_dominantWick ? 1 : 0) + (check3_bodySize ? 1 : 0) + (check4_bodyPosition ? 1 : 0) + (check5_emaTouch ? 1 : 0) + (check6_structureReclaim ? 1 : 0) + (check7_closePosition ? 1 : 0) + (check8_volumeSpike ? 1 : 0)
+
+rejectionQuality = rejectionScore == 8 ? "VALID" : rejectionScore >= 6 ? "MARGINAL" : "INVALID"
+
+// ============================================================================
+// ADDITIONAL VALIDATION (5 Checks)
+// ============================================================================
+
+// 1. Setup Still Valid (check on higher timeframe - placeholder)
+setupStillValid = true // This would need multi-timeframe data in real implementation
+validCheck1 = setupStillValid
+
+// 2. Time Quality
+minutesToClose = activeSession == "EUROPE" ? (europeClose - currentHour) * 60 - currentMinute : activeSession == "US" ? (usClose - currentHour) * 60 - currentMinute : 999
+timeQuality = minutesToClose > timeBufferMinutes ? "GOOD" : minutesToClose > 0 ? "MODERATE" : "POOR"
+validCheck2 = timeQuality == "GOOD"
+
+// 3. No News Events (placeholder - requires external data)
+noNewsEvents = true // This would need news calendar integration
+validCheck3 = noNewsEvents
+
+// 4. Spread Acceptable (placeholder - requires spread data)
+currentSpread = 2.0 // This would need actual spread data
+spreadAcceptable = currentSpread <= maxSpreadPips
+validCheck4 = spreadAcceptable
+
+// 5. Volume Quality (from 1H)
+volumeQuality = volumeRatio >= 1.5 ? "GOOD" : volumeRatio >= 1.2 ? "MODERATE" : "WEAK"
+validCheck5 = volumeQuality == "GOOD" or volumeQuality == "MODERATE"
+
+// Combined Validation Score
+validationScore = (validCheck1 ? 1 : 0) + (validCheck2 ? 1 : 0) + (validCheck3 ? 1 : 0) + (validCheck4 ? 1 : 0) + (validCheck5 ? 1 : 0)
+
+// ============================================================================
+// FINAL SIGNAL DECISION
+// ============================================================================
+
+signalValid = rejectionScore == 8 and validationScore == 5
+signalStatus = signalValid ? "EXECUTE" : rejectionScore >= 7 and validationScore >= 4 ? "WAIT" : "INVALID"
+
+// ============================================================================
+// DISPLAY - UNIFIED PANEL
+// ============================================================================
+
+var table mainPanel = table.new(f_getTablePosition(tablePos), 3, 18, bgcolor=color.new(#000000, 10), frame_color=color.new(#404040, 0), frame_width=2, border_width=1, border_color=color.new(#303030, 0))
+
+if barstate.islast
+    txtSize = getTextSize(tableTextSize)
+    
+    // === HEADER ===
+    headerColor = signalStatus == "EXECUTE" ? color.new(#00FF00, 0) : signalStatus == "WAIT" ? color.new(#FFA500, 0) : color.new(#FF3333, 0)
+    table.cell(mainPanel, 0, 0, "SIGNAL DECISION PANEL", text_color=headerColor, bgcolor=color.new(#1A1A1A, 0), text_size=size.normal, text_halign=text.align_center)
+    table.merge_cells(mainPanel, 0, 0, 2, 0)
+    
+    // === SESSION INFO ===
+    table.cell(mainPanel, 0, 1, "SESSION TRACKER", text_color=color.new(#FFD700, 0), bgcolor=color.new(#2A2A2A, 0), text_size=txtSize, text_halign=text.align_center)
+    table.merge_cells(mainPanel, 0, 1, 2, 1)
+    
+    table.cell(mainPanel, 0, 2, "Current Hour (UTC):", text_color=color.new(#C0C0C0, 0), bgcolor=color.new(#1A1A1A, 0), text_size=txtSize)
+    table.cell(mainPanel, 1, 2, str.format("{0,number,00}:{1,number,00}", currentHour, currentMinute), text_color=color.new(#FFFFFF, 0), bgcolor=color.new(#1A1A1A, 0), text_size=txtSize, text_halign=text.align_right)
+    table.merge_cells(mainPanel, 1, 2, 2, 2)
+    
+    sessionColor = sessionStrength == "PRIME" ? color.new(#00FF00, 0) : sessionStrength == "ACCEPTABLE" ? color.new(#00CC00, 0) : color.new(#808080, 0)
+    table.cell(mainPanel, 0, 3, "Active Session:", text_color=color.new(#C0C0C0, 0), bgcolor=color.new(#1A1A1A, 0), text_size=txtSize)
+    table.cell(mainPanel, 1, 3, activeSession, text_color=sessionColor, bgcolor=color.new(#1A1A1A, 0), text_size=txtSize, text_halign=text.align_right)
+    table.merge_cells(mainPanel, 1, 3, 2, 3)
+    
+    strengthBgColor = sessionStrength == "PRIME" ? color.new(#00FF00, 85) : sessionStrength == "ACCEPTABLE" ? color.new(#00CC00, 85) : color.new(#808080, 85)
+    table.cell(mainPanel, 0, 4, "Session Strength:", text_color=color.new(#C0C0C0, 0), bgcolor=color.new(#1A1A1A, 0), text_size=txtSize)
+    table.cell(mainPanel, 1, 4, sessionStrength, text_color=sessionColor, bgcolor=strengthBgColor, text_size=txtSize, text_halign=text.align_right)
+    table.merge_cells(mainPanel, 1, 4, 2, 4)
+    
+    table.cell(mainPanel, 0, 5, "Session High:", text_color=color.new(#C0C0C0, 0), bgcolor=color.new(#1A1A1A, 0), text_size=txtSize)
+    table.cell(mainPanel, 1, 5, str.tostring(sessionHigh, format.mintick), text_color=color.new(#00FF00, 0), bgcolor=color.new(#1A1A1A, 0), text_size=txtSize, text_halign=text.align_right)
+    table.merge_cells(mainPanel, 1, 5, 2, 5)
+    
+    table.cell(mainPanel, 0, 6, "Session Low:", text_color=color.new(#C0C0C0, 0), bgcolor=color.new(#1A1A1A, 0), text_size=txtSize)
+    table.cell(mainPanel, 1, 6, str.tostring(sessionLow, format.mintick), text_color=color.new(#FF3333, 0), bgcolor=color.new(#1A1A1A, 0), text_size=txtSize, text_halign=text.align_right)
+    table.merge_cells(mainPanel, 1, 6, 2, 6)
+    
+    // === SEPARATOR ===
+    table.cell(mainPanel, 0, 7, "REJECTION CANDLE CRITERIA", text_color=color.new(#FFD700, 0), bgcolor=color.new(#2A2A2A, 0), text_size=txtSize, text_halign=text.align_center)
+    table.merge_cells(mainPanel, 0, 7, 2, 7)
+    
+    // Direction
+    table.cell(mainPanel, 0, 8, "Direction: " + tradeDirection, text_color=color.new(#FFFFFF, 0), bgcolor=color.new(#1A1A1A, 0), text_size=txtSize, text_halign=text.align_center)
+    table.merge_cells(mainPanel, 0, 8, 2, 8)
+    
+    // === REJECTION CRITERIA (8 items) ===
+    table.cell(mainPanel, 0, 9, "1. Wick:Body Ratio", text_color=color.new(#C0C0C0, 0), bgcolor=color.new(#1A1A1A, 0), text_size=txtSize)
+    table.cell(mainPanel, 1, 9, str.tostring(wickBodyRatio, "#.##") + ":1", text_color=color.new(#C0C0C0, 0), bgcolor=color.new(#1A1A1A, 0), text_size=txtSize, text_halign=text.align_center)
+    table.cell(mainPanel, 2, 9, check1_wickRatio ? "PASS" : "FAIL", text_color=check1_wickRatio ? color.new(#00FF00, 0) : color.new(#FF3333, 0), bgcolor=check1_wickRatio ? color.new(#00FF00, 85) : color.new(#FF3333, 85), text_size=txtSize, text_halign=text.align_center)
+    
+    table.cell(mainPanel, 0, 10, "2. Dominant Wick", text_color=color.new(#C0C0C0, 0), bgcolor=color.new(#1A1A1A, 0), text_size=txtSize)
+    table.cell(mainPanel, 1, 10, tradeDirection == "LONG" ? "Lower" : "Upper", text_color=color.new(#C0C0C0, 0), bgcolor=color.new(#1A1A1A, 0), text_size=txtSize, text_halign=text.align_center)
+    table.cell(mainPanel, 2, 10, check2_dominantWick ? "PASS" : "FAIL", text_color=check2_dominantWick ? color.new(#00FF00, 0) : color.new(#FF3333, 0), bgcolor=check2_dominantWick ? color.new(#00FF00, 85) : color.new(#FF3333, 85), text_size=txtSize, text_halign=text.align_center)
+    
+    table.cell(mainPanel, 0, 11, "3. Body Size", text_color=color.new(#C0C0C0, 0), bgcolor=color.new(#1A1A1A, 0), text_size=txtSize)
+    table.cell(mainPanel, 1, 11, str.tostring(bodyPercent, "#.#") + "%", text_color=color.new(#C0C0C0, 0), bgcolor=color.new(#1A1A1A, 0), text_size=txtSize, text_halign=text.align_center)
+    table.cell(mainPanel, 2, 11, check3_bodySize ? "PASS" : "FAIL", text_color=check3_bodySize ? color.new(#00FF00, 0) : color.new(#FF3333, 0), bgcolor=check3_bodySize ? color.new(#00FF00, 85) : color.new(#FF3333, 85), text_size=txtSize, text_halign=text.align_center)
+    
+    table.cell(mainPanel, 0, 12, "4. Body Position", text_color=color.new(#C0C0C0, 0), bgcolor=color.new(#1A1A1A, 0), text_size=txtSize)
+    table.cell(mainPanel, 1, 12, str.tostring(bodyPosition, "#.#") + "%", text_color=color.new(#C0C0C0, 0), bgcolor=color.new(#1A1A1A, 0), text_size=txtSize, text_halign=text.align_center)
+    table.cell(mainPanel, 2, 12, check4_bodyPosition ? "PASS" : "FAIL", text_color=check4_bodyPosition ? color.new(#00FF00, 0) : color.new(#FF3333, 0), bgcolor=check4_bodyPosition ? color.new(#00FF00, 85) : color.new(#FF3333, 85), text_size=txtSize, text_halign=text.align_center)
+    
+    table.cell(mainPanel, 0, 13, "5. EMA Touch/Pierce", text_color=color.new(#C0C0C0, 0), bgcolor=color.new(#1A1A1A, 0), text_size=txtSize)
+    table.cell(mainPanel, 1, 13, emaPierce ? "Pierce" : emaTouch ? "Touch" : "None", text_color=color.new(#C0C0C0, 0), bgcolor=color.new(#1A1A1A, 0), text_size=txtSize, text_halign=text.align_center)
+    table.cell(mainPanel, 2, 13, check5_emaTouch ? "PASS" : "FAIL", text_color=check5_emaTouch ? color.new(#00FF00, 0) : color.new(#FF3333, 0), bgcolor=check5_emaTouch ? color.new(#00FF00, 85) : color.new(#FF3333, 85), text_size=txtSize, text_halign=text.align_center)
+    
+    table.cell(mainPanel, 0, 14, "6. Structure Reclaim", text_color=color.new(#C0C0C0, 0), bgcolor=color.new(#1A1A1A, 0), text_size=txtSize)
+    table.cell(mainPanel, 1, 14, structureReclaim ? "Yes" : "No", text_color=color.new(#C0C0C0, 0), bgcolor=color.new(#1A1A1A, 0), text_size=txtSize, text_halign=text.align_center)
+    table.cell(mainPanel, 2, 14, check6_structureReclaim ? "PASS" : "FAIL", text_color=check6_structureReclaim ? color.new(#00FF00, 0) : color.new(#FF3333, 0), bgcolor=check6_structureReclaim ? color.new(#00FF00, 85) : color.new(#FF3333, 85), text_size=txtSize, text_halign=text.align_center)
+    
+    table.cell(mainPanel, 0, 15, "7. Close vs Previous", text_color=color.new(#C0C0C0, 0), bgcolor=color.new(#1A1A1A, 0), text_size=txtSize)
+    table.cell(mainPanel, 1, 15, tradeDirection == "LONG" ? (close > close[1] ? "Higher" : "Lower") : (close < close[1] ? "Lower" : "Higher"), text_color=color.new(#C0C0C0, 0), bgcolor=color.new(#1A1A1A, 0), text_size=txtSize, text_halign=text.align_center)
+    table.cell(mainPanel, 2, 15, check7_closePosition ? "PASS" : "FAIL", text_color=check7_closePosition ? color.new(#00FF00, 0) : color.new(#FF3333, 0), bgcolor=check7_closePosition ? color.new(#00FF00, 85) : color.new(#FF3333, 85), text_size=txtSize, text_halign=text.align_center)
+    
+    table.cell(mainPanel, 0, 16, "8. Volume Spike", text_color=color.new(#C0C0C0, 0), bgcolor=color.new(#1A1A1A, 0), text_size=txtSize)
+    table.cell(mainPanel, 1, 16, str.tostring(volumeRatio, "#.##") + "x", text_color=color.new(#C0C0C0, 0), bgcolor=color.new(#1A1A1A, 0), text_size=txtSize, text_halign=text.align_center)
+    table.cell(mainPanel, 2, 16, check8_volumeSpike ? "PASS" : "FAIL", text_color=check8_volumeSpike ? color.new(#00FF00, 0) : color.new(#FF3333, 0), bgcolor=check8_volumeSpike ? color.new(#00FF00, 85) : color.new(#FF3333, 85), text_size=txtSize, text_halign=text.align_center)
+    
+    // === FINAL STATUS ===
+    statusBgColor = signalStatus == "EXECUTE" ? color.new(#00FF00, 70) : signalStatus == "WAIT" ? color.new(#FFA500, 70) : color.new(#FF3333, 70)
+    table.cell(mainPanel, 0, 17, signalStatus, text_color=headerColor, bgcolor=statusBgColor, text_size=size.large, text_halign=text.align_center)
+    table.merge_cells(mainPanel, 0, 17, 2, 17)
+
+// ============================================================================
+// ALERTS
+// ============================================================================
+
+if enableAlerts and signalValid and not signalValid[1]
+    alert("VALID SIGNAL: " + tradeDirection + " - All criteria met!", alert.freq_once_per_bar)
+
+alertcondition(signalValid, title="Valid Signal", message="SIGNAL: Valid " + "{{ticker}}" + " signal detected!")
+
+// ============================================================================
+// VISUAL MARKERS
+// ============================================================================
+
+plotshape(signalValid, style=shape.triangleup, location=location.belowbar, color=color.new(#00FF00, 0), size=size.small, title="Valid Signal")
