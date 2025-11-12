@@ -1,0 +1,300 @@
+//@version=6
+indicator("KO Distance Validator [ATR]", "KO VALIDATOR", overlay=true)
+
+// ============================================================================
+// KO DISTANCE VALIDATOR - INDICATOR #18 (ATR VERSION)
+// Framework 2.0 - Cross-Cutting MUST-HAVE (Critical Path)
+// ============================================================================
+// PURPOSE: Validates KO certificate distance to prevent knockout
+// - Uses ATR multiples for framework consistency and universality
+// - Calculates KO distance ratio (must be ≥2.0× stop distance)
+// - Color-coded validation: Green (≥2.5×), Light Green (2.0-2.5×), Red (<2.0×)
+// - Auto-calculates safe KO barrier recommendations
+// - Regime-adjusted requirements (HIGH regime requires 2.5×)
+// - Real-time monitoring with volatility-adjusted proximity alerts
+// - Pre-trade blocking for insufficient distance
+// ============================================================================
+
+// ============================================================================
+// USER INPUTS
+// ============================================================================
+
+// === Display Settings ===
+string tablePos = input.string("top_right", "Table Position", options=["top_left", "top_center", "top_right", "middle_left", "middle_center", "middle_right", "bottom_left", "bottom_center", "bottom_right"], group="Display")
+string tableSize = input.string("normal", "Table Size", options=["auto", "tiny", "small", "normal", "large", "huge"], group="Display")
+bool showLegend = input.bool(false, "Show Legend", group="Display")
+
+// === ATR Settings ===
+int atrLength = input.int(14, "ATR Length", minval=1, tooltip="Period for ATR calculation", group="ATR Settings")
+string atrTimeframe = input.timeframe("", "ATR Timeframe", tooltip="Timeframe for ATR calculation (blank = current)", group="ATR Settings")
+
+// === Trade Settings ===
+string tradeDirection = input.string("NONE", "Trade Direction", options=["NONE", "LONG", "SHORT"], tooltip="Set to LONG or SHORT to calculate KO distance", group="Trade Setup")
+float entryPrice = input.float(0.0, "Entry Price", tooltip="Planned or actual entry price", step=0.0001, group="Trade Setup")
+float stopPrice = input.float(0.0, "Stop Loss Price", tooltip="Planned or actual stop loss price", step=0.0001, group="Trade Setup")
+float koBarrier = input.float(0.0, "KO Barrier Price", tooltip="Knockout barrier of the certificate", step=0.0001, group="Trade Setup")
+
+// === Volatility Regime ===
+string volRegime = input.string("NORMAL", "Volatility Regime", options=["LOW", "NORMAL", "HIGH"], tooltip="Should match Volatility Regime Detector", group="Regime")
+
+// === Slippage Buffer (ATR multiples) ===
+float slippageNormal = input.float(0.05, "Normal Slippage (× ATR)", minval=0, step=0.01, tooltip="Typical slippage in normal conditions", group="Slippage Buffer")
+float slippageHigh = input.float(0.15, "High Vol Slippage (× ATR)", minval=0, step=0.01, tooltip="Slippage during high volatility", group="Slippage Buffer")
+float slippageNews = input.float(0.30, "News Slippage (× ATR)", minval=0, step=0.01, tooltip="Maximum slippage during news events", group="Slippage Buffer")
+
+// === Thresholds ===
+float ratioExcellent = input.float(2.5, "Excellent Ratio", minval=1.0, step=0.1, tooltip="Green zone threshold", group="Thresholds")
+float ratioMinimum = input.float(2.0, "Minimum Ratio", minval=1.0, step=0.1, tooltip="Absolute minimum (MANDATORY)", group="Thresholds")
+float ratioHighRegime = input.float(2.5, "HIGH Regime Minimum", minval=1.0, step=0.1, tooltip="Required for HIGH volatility", group="Thresholds")
+
+// === Real-Time Monitoring (for open positions) ===
+bool inPosition = input.bool(false, "Currently In Position", tooltip="Enable for real-time monitoring", group="Monitoring")
+float currentPrice = input.float(0.0, "Current Market Price", tooltip="Live price for distance tracking", step=0.0001, group="Monitoring")
+
+// === Alert Thresholds (ATR multiples) ===
+float alertDistance1 = input.float(0.50, "Warning Distance (× ATR)", minval=0.1, step=0.05, tooltip="Alert when this close to KO", group="Alerts")
+float alertDistance2 = input.float(0.25, "Danger Distance (× ATR)", minval=0.1, step=0.05, tooltip="Critical alert distance", group="Alerts")
+
+// ============================================================================
+// ATR CALCULATION
+// ============================================================================
+
+// Calculate ATR on specified timeframe
+float atr = request.security(syminfo.tickerid, atrTimeframe, ta.atr(atrLength))
+
+// ============================================================================
+// CALCULATIONS
+// ============================================================================
+
+// === Basic Distance Calculations ===
+isValidSetup = tradeDirection != "NONE" and entryPrice > 0 and stopPrice > 0 and koBarrier > 0 and atr > 0
+
+// Calculate stop distance in price
+stopDistancePrice = tradeDirection == "LONG" ? entryPrice - stopPrice : tradeDirection == "SHORT" ? stopPrice - entryPrice : 0.0
+
+// Calculate stop distance in ATR multiples
+stopDistanceATR = stopDistancePrice / atr
+
+// Calculate KO distance in price
+koDistancePrice = tradeDirection == "LONG" ? entryPrice - koBarrier : tradeDirection == "SHORT" ? koBarrier - entryPrice : 0.0
+
+// Calculate KO distance in ATR multiples
+koDistanceATR = koDistancePrice / atr
+
+// Calculate ratio (this is the key metric)
+koRatio = stopDistanceATR > 0 ? koDistanceATR / stopDistanceATR : 0.0
+
+// === Validation Logic ===
+// Determine minimum required ratio based on regime
+minRequiredRatio = volRegime == "HIGH" ? ratioHighRegime : ratioMinimum
+
+// Validation status
+isExcellent = koRatio >= ratioExcellent
+isAcceptable = koRatio >= minRequiredRatio and koRatio < ratioExcellent
+isRejected = koRatio < minRequiredRatio and koRatio > 0
+
+validationStatus = not isValidSetup ? "NO SETUP" : isExcellent ? "✅ EXCELLENT" : isAcceptable ? "✅ ACCEPTABLE" : "⛔ REJECTED"
+
+validationColor = not isValidSetup ? color.new(color.gray, 0) : isExcellent ? color.new(color.green, 0) : isAcceptable ? color.new(#90EE90, 0) : color.new(color.red, 0)
+
+// === Safe Barrier Calculation ===
+// Calculate what the KO barrier should be for minimum ratio
+safeKOLong = entryPrice - (stopDistancePrice * minRequiredRatio)
+safeKOShort = entryPrice + (stopDistancePrice * minRequiredRatio)
+recommendedKO = tradeDirection == "LONG" ? safeKOLong : tradeDirection == "SHORT" ? safeKOShort : 0.0
+
+// === Slippage Adjustment ===
+// Determine applicable slippage (in ATR multiples)
+applicableSlippage = volRegime == "HIGH" ? slippageHigh : slippageNormal
+slippageInPrice = applicableSlippage * atr
+
+// Adjusted safe KO including slippage buffer
+adjustedSafeKOLong = safeKOLong - slippageInPrice
+adjustedSafeKOShort = safeKOShort + slippageInPrice
+adjustedRecommendedKO = tradeDirection == "LONG" ? adjustedSafeKOLong : tradeDirection == "SHORT" ? adjustedSafeKOShort : 0.0
+
+// === Real-Time Monitoring (for open positions) ===
+currentKODistancePrice = 0.0
+currentKODistanceATR = 0.0
+koProximityStatus = "N/A"
+koProximityColor = color.new(color.gray, 0)
+
+if inPosition and currentPrice > 0 and koBarrier > 0 and atr > 0
+    currentKODistancePrice := tradeDirection == "LONG" ? currentPrice - koBarrier : tradeDirection == "SHORT" ? koBarrier - currentPrice : 0.0
+    currentKODistanceATR := currentKODistancePrice / atr
+    koProximityStatus := currentKODistanceATR <= alertDistance2 ? "🚨 EXIT NOW" : currentKODistanceATR <= alertDistance1 ? "⚠️ WARNING" : "✅ SAFE"
+    koProximityColor := currentKODistanceATR <= alertDistance2 ? color.new(color.red, 0) : currentKODistanceATR <= alertDistance1 ? color.new(color.orange, 0) : color.new(color.green, 0)
+
+// === Trade Blocking Logic ===
+tradeBlocked = isValidSetup and isRejected
+blockMessage = tradeBlocked ? "🛑 KO DISTANCE TOO SMALL" : "✅ KO DISTANCE OK"
+
+// ============================================================================
+// MAIN STATUS TABLE
+// ============================================================================
+// NOTE: This indicator uses overlay=true to display as a table on the main chart
+// All visualization is through the status table for pre-trade planning
+// ============================================================================
+
+var table statusTable = table.new(position=tablePos == "top_left" ? position.top_left : tablePos == "top_center" ? position.top_center : tablePos == "top_right" ? position.top_right : tablePos == "middle_left" ? position.middle_left : tablePos == "middle_center" ? position.middle_center : tablePos == "middle_right" ? position.middle_right : tablePos == "bottom_left" ? position.bottom_left : tablePos == "bottom_center" ? position.bottom_center : position.bottom_right, columns=2, rows=25, bgcolor=color.new(color.black, 10), border_width=2, border_color=color.new(color.orange, 0), frame_width=2, frame_color=color.new(color.orange, 0))
+
+if barstate.islast
+    table.clear(statusTable, 0, 0, 1, 24)
+    
+    // === HEADER ===
+    table.cell(statusTable, 0, 0, "🎯 KO VALIDATOR [ATR]", text_color=color.new(color.white, 0), bgcolor=color.new(color.orange, 30), text_size=tableSize, text_halign=text.align_center)
+    table.merge_cells(statusTable, 0, 0, 1, 0)
+    
+    int rowOffset = 1
+    
+    // === ATR DISPLAY ===
+    table.cell(statusTable, 0, rowOffset, "Current ATR:", text_color=color.new(#FFCC00, 0), bgcolor=color.new(color.black, 30), text_size=tableSize)
+    table.cell(statusTable, 1, rowOffset, str.tostring(atr, format.mintick), text_color=color.new(color.white, 0), bgcolor=color.new(color.black, 30), text_size=tableSize)
+    rowOffset += 1
+    
+    // === TRADE SETUP ===
+    table.cell(statusTable, 0, rowOffset, "Direction:", text_color=color.new(#FFCC00, 0), bgcolor=color.new(color.black, 30), text_size=tableSize)
+    dirColor = tradeDirection == "LONG" ? color.new(color.green, 0) : tradeDirection == "SHORT" ? color.new(color.red, 0) : color.new(color.gray, 0)
+    table.cell(statusTable, 1, rowOffset, tradeDirection, text_color=color.new(color.white, 0), bgcolor=dirColor, text_size=tableSize)
+    rowOffset += 1
+    
+    if isValidSetup
+        table.cell(statusTable, 0, rowOffset, "Entry:", text_color=color.new(#CCCCCC, 0), bgcolor=color.new(color.black, 30), text_size=tableSize)
+        table.cell(statusTable, 1, rowOffset, str.tostring(entryPrice, format.mintick), text_color=color.new(color.white, 0), bgcolor=color.new(color.black, 30), text_size=tableSize)
+        rowOffset += 1
+        
+        table.cell(statusTable, 0, rowOffset, "Stop:", text_color=color.new(#CCCCCC, 0), bgcolor=color.new(color.black, 30), text_size=tableSize)
+        table.cell(statusTable, 1, rowOffset, str.tostring(stopPrice, format.mintick), text_color=color.new(color.white, 0), bgcolor=color.new(color.black, 30), text_size=tableSize)
+        rowOffset += 1
+        
+        table.cell(statusTable, 0, rowOffset, "Stop Distance:", text_color=color.new(#CCCCCC, 0), bgcolor=color.new(color.black, 30), text_size=tableSize)
+        table.cell(statusTable, 1, rowOffset, str.tostring(stopDistanceATR, "#.##") + "× ATR", text_color=color.new(color.white, 0), bgcolor=color.new(color.black, 30), text_size=tableSize)
+        rowOffset += 1
+        
+        table.cell(statusTable, 0, rowOffset, "├─ In Price:", text_color=color.new(#999999, 0), bgcolor=color.new(color.black, 30), text_size=size.small)
+        table.cell(statusTable, 1, rowOffset, str.tostring(stopDistancePrice, format.mintick), text_color=color.new(#999999, 0), bgcolor=color.new(color.black, 30), text_size=size.small)
+        rowOffset += 1
+        
+        table.cell(statusTable, 0, rowOffset, "KO Barrier:", text_color=color.new(#CCCCCC, 0), bgcolor=color.new(color.black, 30), text_size=tableSize)
+        table.cell(statusTable, 1, rowOffset, str.tostring(koBarrier, format.mintick), text_color=color.new(color.white, 0), bgcolor=color.new(color.black, 30), text_size=tableSize)
+        rowOffset += 1
+        
+        table.cell(statusTable, 0, rowOffset, "KO Distance:", text_color=color.new(#CCCCCC, 0), bgcolor=color.new(color.black, 30), text_size=tableSize)
+        table.cell(statusTable, 1, rowOffset, str.tostring(koDistanceATR, "#.##") + "× ATR", text_color=color.new(color.white, 0), bgcolor=color.new(color.black, 30), text_size=tableSize)
+        rowOffset += 1
+        
+        table.cell(statusTable, 0, rowOffset, "├─ In Price:", text_color=color.new(#999999, 0), bgcolor=color.new(color.black, 30), text_size=size.small)
+        table.cell(statusTable, 1, rowOffset, str.tostring(koDistancePrice, format.mintick), text_color=color.new(#999999, 0), bgcolor=color.new(color.black, 30), text_size=size.small)
+        rowOffset += 1
+        
+        // === VALIDATION RESULT ===
+        table.cell(statusTable, 0, rowOffset, "KO Ratio:", text_color=color.new(#FFCC00, 0), bgcolor=color.new(color.black, 30), text_size=tableSize)
+        table.cell(statusTable, 1, rowOffset, str.tostring(koRatio, "#.##") + "×", text_color=color.new(color.white, 0), bgcolor=validationColor, text_size=tableSize)
+        rowOffset += 1
+        
+        table.cell(statusTable, 0, rowOffset, "Status:", text_color=color.new(#FFCC00, 0), bgcolor=color.new(color.black, 30), text_size=tableSize)
+        table.cell(statusTable, 1, rowOffset, validationStatus, text_color=color.new(color.white, 0), bgcolor=validationColor, text_size=tableSize)
+        rowOffset += 1
+        
+        table.cell(statusTable, 0, rowOffset, "Min Required:", text_color=color.new(#CCCCCC, 0), bgcolor=color.new(color.black, 30), text_size=tableSize)
+        table.cell(statusTable, 1, rowOffset, str.tostring(minRequiredRatio, "#.#") + "× (" + volRegime + ")", text_color=color.new(#CCCCCC, 0), bgcolor=color.new(color.black, 30), text_size=tableSize)
+        rowOffset += 1
+        
+        // === TRADE BLOCKING ===
+        if tradeBlocked
+            table.cell(statusTable, 0, rowOffset, blockMessage, text_color=color.new(color.white, 0), bgcolor=color.new(color.red, 0), text_size=tableSize, text_halign=text.align_center)
+            table.merge_cells(statusTable, 0, rowOffset, 1, rowOffset)
+            rowOffset += 1
+        
+        // === SAFE BARRIER RECOMMENDATION ===
+        table.cell(statusTable, 0, rowOffset, "Safe KO (min):", text_color=color.new(#FFCC00, 0), bgcolor=color.new(color.black, 30), text_size=tableSize)
+        table.cell(statusTable, 1, rowOffset, str.tostring(recommendedKO, format.mintick), text_color=color.new(color.green, 0), bgcolor=color.new(color.black, 30), text_size=tableSize)
+        rowOffset += 1
+        
+        table.cell(statusTable, 0, rowOffset, "├─ w/ Slippage:", text_color=color.new(#CCCCCC, 0), bgcolor=color.new(color.black, 30), text_size=tableSize)
+        table.cell(statusTable, 1, rowOffset, str.tostring(adjustedRecommendedKO, format.mintick), text_color=color.new(#CCCCCC, 0), bgcolor=color.new(color.black, 30), text_size=tableSize)
+        rowOffset += 1
+        
+        table.cell(statusTable, 0, rowOffset, "└─ Buffer:", text_color=color.new(#CCCCCC, 0), bgcolor=color.new(color.black, 30), text_size=tableSize)
+        table.cell(statusTable, 1, rowOffset, str.tostring(applicableSlippage, "#.##") + "× ATR", text_color=color.new(#CCCCCC, 0), bgcolor=color.new(color.black, 30), text_size=tableSize)
+        rowOffset += 1
+        
+        // === REAL-TIME MONITORING ===
+        if inPosition
+            table.cell(statusTable, 0, rowOffset, "Current Price:", text_color=color.new(#FFCC00, 0), bgcolor=color.new(color.black, 30), text_size=tableSize)
+            table.cell(statusTable, 1, rowOffset, str.tostring(currentPrice, format.mintick), text_color=color.new(color.white, 0), bgcolor=color.new(color.black, 30), text_size=tableSize)
+            rowOffset += 1
+            
+            table.cell(statusTable, 0, rowOffset, "To KO Barrier:", text_color=color.new(#FFCC00, 0), bgcolor=color.new(color.black, 30), text_size=tableSize)
+            table.cell(statusTable, 1, rowOffset, str.tostring(currentKODistanceATR, "#.##") + "× ATR", text_color=color.new(color.white, 0), bgcolor=koProximityColor, text_size=tableSize)
+            rowOffset += 1
+            
+            table.cell(statusTable, 0, rowOffset, "├─ In Price:", text_color=color.new(#999999, 0), bgcolor=color.new(color.black, 30), text_size=size.small)
+            table.cell(statusTable, 1, rowOffset, str.tostring(currentKODistancePrice, format.mintick), text_color=color.new(#999999, 0), bgcolor=color.new(color.black, 30), text_size=size.small)
+            rowOffset += 1
+            
+            table.cell(statusTable, 0, rowOffset, "Proximity:", text_color=color.new(#FFCC00, 0), bgcolor=color.new(color.black, 30), text_size=tableSize)
+            table.cell(statusTable, 1, rowOffset, koProximityStatus, text_color=color.new(color.white, 0), bgcolor=koProximityColor, text_size=tableSize)
+            rowOffset += 1
+    else
+        table.cell(statusTable, 0, rowOffset, "⚠️ No Setup Configured", text_color=color.new(color.yellow, 0), bgcolor=color.new(color.black, 30), text_size=tableSize, text_halign=text.align_center)
+        table.merge_cells(statusTable, 0, rowOffset, 1, rowOffset)
+        rowOffset += 1
+        
+        table.cell(statusTable, 0, rowOffset, "Set Direction, Entry, Stop, KO", text_color=color.new(#CCCCCC, 0), bgcolor=color.new(color.black, 30), text_size=size.small, text_halign=text.align_center)
+        table.merge_cells(statusTable, 0, rowOffset, 1, rowOffset)
+
+// ============================================================================
+// LEGEND TABLE (TOGGLE)
+// ============================================================================
+
+var table legendTable = table.new(position=position.bottom_left, columns=1, rows=22, bgcolor=color.new(color.black, 10), border_width=1, border_color=color.new(color.gray, 0), frame_width=1, frame_color=color.new(color.gray, 0))
+
+if barstate.islast and showLegend
+    table.clear(legendTable, 0, 0, 0, 21)
+    
+    table.cell(legendTable, 0, 0, "📖 KO VALIDATOR LEGEND [ATR]", text_color=color.new(#FFCC00, 0), bgcolor=color.new(color.black, 30), text_size=size.normal)
+    table.cell(legendTable, 0, 1, " ", text_color=color.new(color.white, 0), bgcolor=color.new(color.black, 30), text_size=size.small)
+    
+    table.cell(legendTable, 0, 2, "WHY ATR?", text_color=color.new(color.white, 0), bgcolor=color.new(color.black, 30), text_size=size.small)
+    table.cell(legendTable, 0, 3, "✓ Universal across all instruments", text_color=color.new(color.green, 0), bgcolor=color.new(color.black, 30), text_size=size.small)
+    table.cell(legendTable, 0, 4, "✓ Volatility-adjusted automatically", text_color=color.new(color.green, 0), bgcolor=color.new(color.black, 30), text_size=size.small)
+    table.cell(legendTable, 0, 5, "✓ Framework 2.0 standard", text_color=color.new(color.green, 0), bgcolor=color.new(color.black, 30), text_size=size.small)
+    table.cell(legendTable, 0, 6, " ", text_color=color.new(color.white, 0), bgcolor=color.new(color.black, 30), text_size=size.small)
+    
+    table.cell(legendTable, 0, 7, "KO RATIO ZONES:", text_color=color.new(color.white, 0), bgcolor=color.new(color.black, 30), text_size=size.small)
+    table.cell(legendTable, 0, 8, "🟢 EXCELLENT: ≥2.5× (Preferred)", text_color=color.new(color.green, 0), bgcolor=color.new(color.black, 30), text_size=size.small)
+    table.cell(legendTable, 0, 9, "🟢 ACCEPTABLE: 2.0-2.5× (OK)", text_color=color.new(#90EE90, 0), bgcolor=color.new(color.black, 30), text_size=size.small)
+    table.cell(legendTable, 0, 10, "🔴 REJECTED: <2.0× (BLOCK TRADE)", text_color=color.new(color.red, 0), bgcolor=color.new(color.black, 30), text_size=size.small)
+    table.cell(legendTable, 0, 11, " ", text_color=color.new(color.white, 0), bgcolor=color.new(color.black, 30), text_size=size.small)
+    
+    table.cell(legendTable, 0, 12, "REGIME REQUIREMENTS:", text_color=color.new(color.white, 0), bgcolor=color.new(color.black, 30), text_size=size.small)
+    table.cell(legendTable, 0, 13, "LOW: 2.0× acceptable", text_color=color.new(#CCCCCC, 0), bgcolor=color.new(color.black, 30), text_size=size.small)
+    table.cell(legendTable, 0, 14, "NORMAL: 2.0-2.5× recommended", text_color=color.new(#CCCCCC, 0), bgcolor=color.new(color.black, 30), text_size=size.small)
+    table.cell(legendTable, 0, 15, "HIGH: 2.5× REQUIRED", text_color=color.new(color.orange, 0), bgcolor=color.new(color.black, 30), text_size=size.small)
+    table.cell(legendTable, 0, 16, " ", text_color=color.new(color.white, 0), bgcolor=color.new(color.black, 30), text_size=size.small)
+    
+    table.cell(legendTable, 0, 17, "CALCULATION:", text_color=color.new(color.white, 0), bgcolor=color.new(color.black, 30), text_size=size.small)
+    table.cell(legendTable, 0, 18, "Ratio = (KO Distance) / (Stop Distance)", text_color=color.new(#CCCCCC, 0), bgcolor=color.new(color.black, 30), text_size=size.small)
+    table.cell(legendTable, 0, 19, "Distances in ATR multiples", text_color=color.new(#CCCCCC, 0), bgcolor=color.new(color.black, 30), text_size=size.small)
+    table.cell(legendTable, 0, 20, " ", text_color=color.new(color.white, 0), bgcolor=color.new(color.black, 30), text_size=size.small)
+    
+    table.cell(legendTable, 0, 21, "Price shown for reference only", text_color=color.new(#666666, 0), bgcolor=color.new(color.black, 30), text_size=size.tiny)
+
+// ============================================================================
+// ALERTS
+// ============================================================================
+
+// Pre-trade validation alert
+alertcondition(tradeBlocked, "🛑 KO Distance Invalid", "KO distance ratio below minimum - BLOCK TRADE")
+
+// Real-time monitoring alerts (ATR-based)
+alertcondition(inPosition and currentKODistanceATR <= alertDistance1 and currentKODistanceATR > alertDistance2, "⚠️ KO Warning", "Price approaching KO barrier")
+alertcondition(inPosition and currentKODistanceATR <= alertDistance2, "🚨 KO Danger", "CRITICAL: Price near KO barrier - EXIT NOW")
+
+// Excellent setup alert
+alertcondition(isExcellent and not tradeBlocked, "✅ Excellent KO Ratio", "KO distance ratio ≥2.5× - Excellent safety margin")
+
+// ============================================================================
+// END OF INDICATOR
+// ============================================================================
