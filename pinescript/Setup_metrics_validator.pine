@@ -1,0 +1,572 @@
+//@version=6
+indicator("SETUP - Metrics Validator v3.1 (ATR-ONLY)", overlay=true, max_bars_back=500)
+
+// ============================================================================
+// STAGE 3: SETUP - METRICS VALIDATOR v3.1 (ATR-ONLY VERSION)
+// ============================================================================
+// Created: 2025-11-14 02:00 CET
+// Purpose: Validate ALL 7 binary setup criteria for Framework v1.6
+// Displays: Binary 7/7 decision, all thresholds, risk parameters, clear status
+// 
+// CRITICAL UPDATE v3.1: Removed ALL "pips" references - pure ATR multiples only
+// - Framework v1.6 is 100% ATR-based, not pips-based
+// - All distances shown as ATR multiples (universal across instruments)
+// - Cleaner, more framework-consistent display
+// ============================================================================
+
+// ============================================================================
+// INPUTS - Display Settings
+// ============================================================================
+
+string tablePos = input.string("top_right", "Table Position", options=["top_left", "top_center", "top_right", "middle_left", "middle_center", "middle_right", "bottom_left", "bottom_center", "bottom_right"], group="Display")
+string tableSize = input.string("small", "Text Size", options=["auto", "tiny", "small", "normal", "large"], group="Display")
+bool showLegend = input.bool(false, "Show Detailed Legend", group="Display")
+bool showInvalidationLines = input.bool(true, "Show Invalidation Lines", group="Display")
+bool showEntryZone = input.bool(true, "Show Entry Zone Box", group="Display")
+bool showRiskLines = input.bool(true, "Show Stop/Target Lines", group="Display")
+
+// ============================================================================
+// INPUTS - EMA Settings
+// ============================================================================
+
+int emaFast = input.int(8, "Fast EMA", minval=1, group="EMA Settings")
+int emaMid = input.int(21, "Mid EMA", minval=1, group="EMA Settings")
+int emaSlow = input.int(55, "Slow EMA", minval=1, group="EMA Settings")
+
+// ============================================================================
+// INPUTS - ATR Settings
+// ============================================================================
+
+int atrPeriod = input.int(14, "ATR Period", minval=1, group="ATR Settings")
+int atrLookback = input.int(100, "ATR Lookback for Percentile", minval=50, maxval=500, group="ATR Settings")
+
+// ============================================================================
+// INPUTS - ADX Settings (CRITERION 1)
+// ============================================================================
+
+int adxLength = input.int(14, "ADX Length", minval=1, group="ADX Settings (Criterion 1)")
+int adxSmoothing = input.int(14, "ADX Smoothing", minval=1, group="ADX Settings (Criterion 1)")
+float adxThreshold = input.float(25.0, "ADX Threshold (≥)", minval=0, maxval=100, group="ADX Settings (Criterion 1)")
+
+// ============================================================================
+// INPUTS - Gap Ratio Thresholds (CRITERION 4)
+// ============================================================================
+
+float gapMin = input.float(0.5, "Min Gap Ratio (× ATR)", minval=0, step=0.1, group="Gap Ratio (Criterion 4)")
+float gapMax = input.float(2.0, "Max Gap Ratio (× ATR)", minval=0, step=0.1, group="Gap Ratio (Criterion 4)")
+float gapIdealMin = input.float(0.7, "Ideal Min (× ATR)", minval=0, step=0.1, group="Gap Ratio (Criterion 4)")
+float gapIdealMax = input.float(1.5, "Ideal Max (× ATR)", minval=0, step=0.1, group="Gap Ratio (Criterion 4)")
+
+// ============================================================================
+// INPUTS - ATR Regime Thresholds (CRITERION 5)
+// ============================================================================
+
+float atrP30 = input.float(30.0, "LOW Percentile (<)", minval=0, maxval=100, group="ATR Regime (Criterion 5)")
+float atrP70 = input.float(70.0, "HIGH Percentile (>)", minval=0, maxval=100, group="ATR Regime (Criterion 5)")
+
+// ============================================================================
+// INPUTS - Regime Classification Thresholds (CRITERIA 6 & 7)
+// ============================================================================
+
+float regimeRanging = input.float(0.3, "RANGING Threshold (Gap < × ATR)", minval=0, step=0.05, group="Daily/4H Regime (Criteria 6&7)")
+float regimeWeak = input.float(0.5, "WEAK Threshold (Gap < × ATR)", minval=0, step=0.05, group="Daily/4H Regime (Criteria 6&7)")
+float regimeBreakout = input.float(2.5, "BREAKOUT Threshold (Gap > × ATR)", minval=0, step=0.1, group="Daily/4H Regime (Criteria 6&7)")
+
+// ============================================================================
+// INPUTS - CMF Settings (CRITERION 3)
+// ============================================================================
+
+int cmfLength = input.int(60, "CMF Length (4H)", minval=1, group="CMF Settings (Criterion 3)")
+float cmfThreshold = input.float(10.0, "CMF Strong Threshold (≥)", minval=0, group="CMF Settings (Criterion 3)")
+
+// ============================================================================
+// INPUTS - Risk Management
+// ============================================================================
+
+float stopMultiplier = input.float(1.2, "Stop Distance (× ATR)", minval=0.5, step=0.1, group="Risk Management")
+float targetMultiplier = input.float(1.5, "Target R-Multiple (Normal)", minval=1.0, step=0.1, group="Risk Management")
+float entryZoneMultiplier = input.float(0.5, "Entry Zone (± × ATR)", minval=0.1, step=0.1, group="Risk Management")
+
+// ============================================================================
+// CALCULATIONS - Core Indicators
+// ============================================================================
+
+// EMAs
+ema8 = ta.ema(close, emaFast)
+ema21 = ta.ema(close, emaMid)
+ema55 = ta.ema(close, emaSlow)
+
+// ATR
+atr = ta.atr(atrPeriod)
+atrPercentile = ta.percentile_nearest_rank(atr, atrLookback, 50)
+
+// Gap calculations (for Criterion 4)
+gap8_21 = math.abs(ema8 - ema21)
+gapRatio = gap8_21 / atr
+
+// ADX Calculation (CRITERION 1)
+[diPlus, diMinus, adx] = ta.dmi(adxLength, adxSmoothing)
+
+// CMF on 4H (CRITERION 3)
+cmfCalc(length) =>
+    mfm = ((close - low) - (high - close)) / (high - low)
+    mfv = mfm * volume
+    ta.sma(mfv, length) / ta.sma(volume, length) * 100
+
+[cmf4H] = request.security(syminfo.tickerid, "240", [cmfCalc(cmfLength)], lookahead=barmerge.lookahead_on)
+
+// ============================================================================
+// CRITERION 1: TREND STRENGTH (ADX >= 25)
+// ============================================================================
+
+// ADX strength classification
+adxQuality = adx >= 40 ? "VERY STRONG" : adx >= 30 ? "STRONG" : adx >= 25 ? "ACCEPTABLE" : "WEAK"
+
+// CRITERION 1 PASS/FAIL
+crit1Pass = adx >= adxThreshold
+crit1Display = str.tostring(adx, "#.#") + " / " + str.tostring(adxThreshold, "#") + "+ (" + adxQuality + ")"
+
+// ============================================================================
+// CRITERION 2: EMA ALIGNMENT (with direction display)
+// ============================================================================
+
+// Check perfect alignment
+emaAlignedLong = close > ema8 and ema8 > ema21 and ema21 > ema55
+emaAlignedShort = close < ema8 and ema8 < ema21 and ema21 < ema55
+emaAligned = emaAlignedLong or emaAlignedShort
+
+// Determine direction
+direction = emaAlignedLong ? "LONG" : emaAlignedShort ? "SHORT" : "NO DIRECTION"
+
+// CRITERION 2 PASS/FAIL
+crit2Pass = emaAligned
+crit2Display = direction + (emaAlignedLong ? " (8>21>55)" : emaAlignedShort ? " (8<21<55)" : " (NOT ALIGNED)")
+
+// ============================================================================
+// CRITERION 3: CMF (4H) (with threshold display)
+// ============================================================================
+
+// CMF strength classification
+cmfStrength = math.abs(cmf4H) >= cmfThreshold ? "STRONG" : "WEAK"
+
+// Check direction alignment with CMF
+cmfAligned = (emaAlignedLong and cmf4H >= cmfThreshold) or (emaAlignedShort and cmf4H <= -cmfThreshold) or not emaAligned
+
+// CRITERION 3 PASS/FAIL
+crit3Pass = (emaAlignedLong and cmf4H >= cmfThreshold) or (emaAlignedShort and cmf4H <= -cmfThreshold)
+crit3Display = str.tostring(cmf4H, "#.#") + " / " + (emaAlignedLong ? "+" : "-") + str.tostring(cmfThreshold, "#") + "+ (" + cmfStrength + ")"
+
+// ============================================================================
+// CRITERION 4: GAP RATIO (with threshold display)
+// ============================================================================
+
+// Gap quality classification
+gapQuality = gapRatio >= gapIdealMin and gapRatio <= gapIdealMax ? "IDEAL" : gapRatio >= gapMin and gapRatio <= gapMax ? "ACCEPTABLE" : gapRatio < gapMin ? "TOO SMALL" : "TOO LARGE"
+
+// CRITERION 4 PASS/FAIL
+crit4Pass = gapRatio >= gapMin and gapRatio <= gapMax
+crit4Display = str.tostring(gapRatio, "#.##") + "× / " + str.tostring(gapMin, "#.#") + "-" + str.tostring(gapMax, "#.#") + " (" + gapQuality + ")"
+
+// ============================================================================
+// CRITERION 5: ATR REGIME (with threshold display)
+// ============================================================================
+
+// ATR regime classification
+atrStatus = atrPercentile < atrP30 ? "LOW" : atrPercentile > atrP70 ? "HIGH" : "NORMAL"
+
+// CRITERION 5 PASS/FAIL (ALL REGIMES PASS - this is informational only)
+crit5Pass = true  // Always passes per Framework v1.6
+crit5Display = "P" + str.tostring(atrPercentile, "#") + " (" + atrStatus + ") - INFO ONLY"
+
+// ============================================================================
+// CRITERION 6: DAILY REGIME (with classification)
+// ============================================================================
+
+// Get daily data
+[dailyEma8, dailyEma21, dailyEma55, dailyAtr] = request.security(syminfo.tickerid, "D", [ta.ema(close, emaFast), ta.ema(close, emaMid), ta.ema(close, emaSlow), ta.atr(atrPeriod)], lookahead=barmerge.lookahead_on)
+
+// Calculate daily gap
+dailyGap = math.abs(dailyEma8 - dailyEma21)
+dailyGapRatio = dailyGap / dailyAtr
+
+// Daily regime classification
+dailyRegime = dailyGapRatio < regimeRanging ? "RANGING" : dailyGapRatio < regimeWeak ? "WEAK TREND" : dailyGapRatio > regimeBreakout ? "BREAKOUT" : "CALM TREND"
+
+// Check daily EMA alignment
+dailyAlignedLong = dailyEma8 > dailyEma21
+dailyAlignedShort = dailyEma8 < dailyEma21
+
+// CRITERION 6 PASS/FAIL (CALM TREND + correct EMA alignment)
+crit6Pass = (dailyRegime == "CALM TREND") and ((emaAlignedLong and dailyAlignedLong) or (emaAlignedShort and dailyAlignedShort))
+crit6Display = dailyRegime + " (Gap: " + str.tostring(dailyGapRatio, "#.##") + "×)" + (dailyAlignedLong ? " ↑" : " ↓")
+
+// ============================================================================
+// CRITERION 7: 4H REGIME (with classification)
+// ============================================================================
+
+// Get 4H data
+[ema8_4H, ema21_4H, ema55_4H, atr4H] = request.security(syminfo.tickerid, "240", [ta.ema(close, emaFast), ta.ema(close, emaMid), ta.ema(close, emaSlow), ta.atr(atrPeriod)], lookahead=barmerge.lookahead_on)
+
+// Calculate 4H gap
+gap4H = math.abs(ema8_4H - ema21_4H)
+gapRatio4H = gap4H / atr4H
+
+// 4H regime classification
+regime4H = gapRatio4H < regimeRanging ? "RANGING" : gapRatio4H < regimeWeak ? "WEAK TREND" : gapRatio4H > regimeBreakout ? "BREAKOUT" : "CALM TREND"
+
+// Check 4H EMA alignment
+aligned4HLong = ema8_4H > ema21_4H
+aligned4HShort = ema8_4H < ema21_4H
+
+// CRITERION 7 PASS/FAIL (CALM TREND + correct EMA alignment)
+crit7Pass = (regime4H == "CALM TREND") and ((emaAlignedLong and aligned4HLong) or (emaAlignedShort and aligned4HShort))
+crit7Display = regime4H + " (Gap: " + str.tostring(gapRatio4H, "#.##") + "×)" + (aligned4HLong ? " ↑" : " ↓")
+
+// ============================================================================
+// BINARY DECISION: 7/7 VALIDATION
+// ============================================================================
+
+// Count passing criteria
+criteriaScore = 0
+criteriaScore := criteriaScore + (crit1Pass ? 1 : 0)
+criteriaScore := criteriaScore + (crit2Pass ? 1 : 0)
+criteriaScore := criteriaScore + (crit3Pass ? 1 : 0)
+criteriaScore := criteriaScore + (crit4Pass ? 1 : 0)
+criteriaScore := criteriaScore + (crit5Pass ? 1 : 0)
+criteriaScore := criteriaScore + (crit6Pass ? 1 : 0)
+criteriaScore := criteriaScore + (crit7Pass ? 1 : 0)
+
+// VALID only if all 7 pass
+validSetup = criteriaScore == 7
+
+// ============================================================================
+// SYSTEM STATUS
+// ============================================================================
+
+// System status based on volatility and daily regime
+systemStatus = atrStatus == "LOW" ? "RESTRICTED" : dailyRegime == "RANGING" or dailyRegime == "BREAKOUT" ? "RESTRICTED" : "ACTIVE"
+
+// ============================================================================
+// RISK PARAMETERS CALCULATION
+// ============================================================================
+
+// Position sizing based on volatility regime (Framework v1.6 rules)
+positionSize = atrStatus == "HIGH" ? 50.0 : atrStatus == "LOW" ? 100.0 : systemStatus == "RESTRICTED" ? 75.0 : 100.0
+
+// Stop loss calculation (regime-adjusted per Framework v1.6)
+stopMultiplierAdjusted = atrStatus == "LOW" ? 0.8 : atrStatus == "HIGH" ? 1.5 : stopMultiplier
+stopDistance = atr * stopMultiplierAdjusted
+stopLoss = direction == "LONG" ? close - stopDistance : direction == "SHORT" ? close + stopDistance : close
+
+// Target calculation (regime-adjusted per Framework v1.6)
+targetMultiplierAdjusted = atrStatus == "LOW" ? 1.3 : targetMultiplier
+targetDistance = stopDistance * targetMultiplierAdjusted
+target = direction == "LONG" ? close + targetDistance : direction == "SHORT" ? close - targetDistance : close
+
+// Entry zone calculation
+entryZoneRange = atr * entryZoneMultiplier
+entryZoneHigh = close + entryZoneRange
+entryZoneLow = close - entryZoneRange
+
+// R:R ratio
+rrRatio = targetMultiplierAdjusted
+
+// KO Distance requirement (regime-adjusted per Framework v1.6)
+koMultiplier = atrStatus == "HIGH" ? 3.5 : 2.5
+koMinDistance = atr * koMultiplier
+
+// ============================================================================
+// ALERT CROSSING CONDITIONS
+// ============================================================================
+
+ema8CrossUnder = ta.crossunder(close, ema8)
+ema8CrossOver = ta.crossover(close, ema8)
+ema8Cross = ema8CrossUnder or ema8CrossOver
+
+ema55CrossUnder = ta.crossunder(close, ema55)
+ema55CrossOver = ta.crossover(close, ema55)
+ema55Cross = ema55CrossUnder or ema55CrossOver
+
+// ============================================================================
+// MAIN TABLE DISPLAY
+// ============================================================================
+
+var table setupTable = table.new(tablePos, 3, 17, border_width=1, border_color=color.new(#3A3A3A, 0), frame_color=color.new(#3A3A3A, 0), frame_width=1)
+
+if barstate.islast
+    // CONSISTENT TEXT SIZE
+    txtSize = tableSize == "auto" ? size.auto : tableSize == "tiny" ? size.tiny : tableSize == "small" ? size.small : tableSize == "normal" ? size.normal : size.large
+    
+    // ========== BINARY DECISION HEADER (MOST PROMINENT) ==========
+    decisionText = validSetup ? "✓ SETUP VALID (7/7)" : "✗ SETUP INVALID (" + str.tostring(criteriaScore) + "/7)"
+    decisionColor = validSetup ? color.new(#4CAF50, 0) : color.new(#F44336, 0)
+    
+    table.cell(setupTable, 0, 0, decisionText, text_color=color.new(#FFFFFF, 0), bgcolor=decisionColor, text_size=size.large)
+    table.merge_cells(setupTable, 0, 0, 2, 0)
+    
+    // ========== SYSTEM STATUS & DIRECTION ==========
+    table.cell(setupTable, 0, 1, "System Status", text_color=color.new(#E8E8E8, 0), bgcolor=color.new(#37474F, 0), text_size=txtSize)
+    statusColor = systemStatus == "ACTIVE" ? color.new(#4CAF50, 0) : systemStatus == "RESTRICTED" ? color.new(#FFC107, 0) : color.new(#F44336, 0)
+    table.cell(setupTable, 1, 1, systemStatus, text_color=statusColor, bgcolor=color.new(#263238, 0), text_size=txtSize)
+    table.cell(setupTable, 2, 1, "Direction: " + direction, text_color=color.new(#64B5F6, 0), bgcolor=color.new(#263238, 0), text_size=txtSize)
+    
+    // ========== 7 CRITERIA HEADER ==========
+    table.cell(setupTable, 0, 2, "Criterion", text_color=color.new(#FFFFFF, 0), bgcolor=color.new(#37474F, 0), text_size=txtSize)
+    table.cell(setupTable, 1, 2, "Value / Threshold", text_color=color.new(#FFFFFF, 0), bgcolor=color.new(#37474F, 0), text_size=txtSize)
+    table.cell(setupTable, 2, 2, "Status", text_color=color.new(#FFFFFF, 0), bgcolor=color.new(#37474F, 0), text_size=txtSize)
+    
+    // ========== CRITERION 1: ADX (TREND STRENGTH) ==========
+    table.cell(setupTable, 0, 3, "1. Trend Strength (ADX)", text_color=color.new(#FFFFFF, 0), bgcolor=color.new(#263238, 0), text_size=txtSize)
+    table.cell(setupTable, 1, 3, crit1Display, text_color=color.new(#B0BEC5, 0), bgcolor=color.new(#263238, 0), text_size=txtSize)
+    table.cell(setupTable, 2, 3, crit1Pass ? "PASS" : "FAIL", text_color=crit1Pass ? color.new(#4CAF50, 0) : color.new(#F44336, 0), bgcolor=color.new(#263238, 0), text_size=txtSize)
+    
+    // ========== CRITERION 2: EMA ALIGNMENT ==========
+    table.cell(setupTable, 0, 4, "2. EMA Alignment", text_color=color.new(#FFFFFF, 0), bgcolor=color.new(#1C2428, 0), text_size=txtSize)
+    table.cell(setupTable, 1, 4, crit2Display, text_color=color.new(#B0BEC5, 0), bgcolor=color.new(#1C2428, 0), text_size=txtSize)
+    table.cell(setupTable, 2, 4, crit2Pass ? "PASS" : "FAIL", text_color=crit2Pass ? color.new(#4CAF50, 0) : color.new(#F44336, 0), bgcolor=color.new(#1C2428, 0), text_size=txtSize)
+    
+    // ========== CRITERION 3: CMF (4H) ==========
+    table.cell(setupTable, 0, 5, "3. CMF (4H)", text_color=color.new(#FFFFFF, 0), bgcolor=color.new(#263238, 0), text_size=txtSize)
+    table.cell(setupTable, 1, 5, crit3Display, text_color=color.new(#B0BEC5, 0), bgcolor=color.new(#263238, 0), text_size=txtSize)
+    table.cell(setupTable, 2, 5, crit3Pass ? "PASS" : "FAIL", text_color=crit3Pass ? color.new(#4CAF50, 0) : color.new(#F44336, 0), bgcolor=color.new(#263238, 0), text_size=txtSize)
+    
+    // ========== CRITERION 4: GAP RATIO ==========
+    table.cell(setupTable, 0, 6, "4. Gap Ratio", text_color=color.new(#FFFFFF, 0), bgcolor=color.new(#1C2428, 0), text_size=txtSize)
+    table.cell(setupTable, 1, 6, crit4Display, text_color=color.new(#B0BEC5, 0), bgcolor=color.new(#1C2428, 0), text_size=txtSize)
+    table.cell(setupTable, 2, 6, crit4Pass ? "PASS" : "FAIL", text_color=crit4Pass ? color.new(#4CAF50, 0) : color.new(#F44336, 0), bgcolor=color.new(#1C2428, 0), text_size=txtSize)
+    
+    // ========== CRITERION 5: ATR REGIME ==========
+    table.cell(setupTable, 0, 7, "5. ATR Regime", text_color=color.new(#FFFFFF, 0), bgcolor=color.new(#263238, 0), text_size=txtSize)
+    table.cell(setupTable, 1, 7, crit5Display, text_color=color.new(#B0BEC5, 0), bgcolor=color.new(#263238, 0), text_size=txtSize)
+    table.cell(setupTable, 2, 7, "PASS", text_color=color.new(#4CAF50, 0), bgcolor=color.new(#263238, 0), text_size=txtSize)
+    
+    // ========== CRITERION 6: DAILY REGIME ==========
+    table.cell(setupTable, 0, 8, "6. Daily Regime", text_color=color.new(#FFFFFF, 0), bgcolor=color.new(#1C2428, 0), text_size=txtSize)
+    table.cell(setupTable, 1, 8, crit6Display, text_color=color.new(#B0BEC5, 0), bgcolor=color.new(#1C2428, 0), text_size=txtSize)
+    table.cell(setupTable, 2, 8, crit6Pass ? "PASS" : "FAIL", text_color=crit6Pass ? color.new(#4CAF50, 0) : color.new(#F44336, 0), bgcolor=color.new(#1C2428, 0), text_size=txtSize)
+    
+    // ========== CRITERION 7: 4H REGIME ==========
+    table.cell(setupTable, 0, 9, "7. 4H Regime", text_color=color.new(#FFFFFF, 0), bgcolor=color.new(#263238, 0), text_size=txtSize)
+    table.cell(setupTable, 1, 9, crit7Display, text_color=color.new(#B0BEC5, 0), bgcolor=color.new(#263238, 0), text_size=txtSize)
+    table.cell(setupTable, 2, 9, crit7Pass ? "PASS" : "FAIL", text_color=crit7Pass ? color.new(#4CAF50, 0) : color.new(#F44336, 0), bgcolor=color.new(#263238, 0), text_size=txtSize)
+    
+    // ========== RISK PARAMETERS HEADER ==========
+    table.cell(setupTable, 0, 10, "RISK PARAMETERS", text_color=color.new(#FFFFFF, 0), bgcolor=color.new(#37474F, 0), text_size=txtSize)
+    table.merge_cells(setupTable, 0, 10, 2, 10)
+    
+    // ========== ATR VALUE ==========
+    table.cell(setupTable, 0, 11, "ATR(14) Value", text_color=color.new(#E8E8E8, 0), bgcolor=color.new(#263238, 0), text_size=txtSize)
+    atrText = str.tostring(atr, format.mintick)
+    table.cell(setupTable, 1, 11, atrText, text_color=color.new(#64B5F6, 0), bgcolor=color.new(#263238, 0), text_size=txtSize)
+    table.cell(setupTable, 2, 11, "P" + str.tostring(atrPercentile, "#"), text_color=color.new(#B0BEC5, 0), bgcolor=color.new(#263238, 0), text_size=txtSize)
+    
+    // ========== POSITION SIZE ==========
+    table.cell(setupTable, 0, 12, "Position Size", text_color=color.new(#E8E8E8, 0), bgcolor=color.new(#1C2428, 0), text_size=txtSize)
+    posText = str.tostring(positionSize, "#") + " EUR (" + atrStatus + " regime)"
+    table.cell(setupTable, 1, 12, posText, text_color=color.new(#FFD54F, 0), bgcolor=color.new(#1C2428, 0), text_size=txtSize)
+    table.cell(setupTable, 2, 12, systemStatus, text_color=statusColor, bgcolor=color.new(#1C2428, 0), text_size=txtSize)
+    
+    // ========== STOP LOSS (ATR-ONLY) ==========
+    table.cell(setupTable, 0, 13, "Stop Loss", text_color=color.new(#E8E8E8, 0), bgcolor=color.new(#263238, 0), text_size=txtSize)
+    stopText = str.tostring(stopLoss, format.mintick)
+    table.cell(setupTable, 1, 13, stopText, text_color=color.new(#F44336, 0), bgcolor=color.new(#263238, 0), text_size=txtSize)
+    stopAtrText = str.tostring(stopMultiplierAdjusted, "#.#") + "× ATR (" + str.tostring(stopDistance, format.mintick) + ")"
+    table.cell(setupTable, 2, 13, stopAtrText, text_color=color.new(#B0BEC5, 0), bgcolor=color.new(#263238, 0), text_size=txtSize)
+    
+    // ========== TARGET (ATR-ONLY) ==========
+    table.cell(setupTable, 0, 14, "Target", text_color=color.new(#E8E8E8, 0), bgcolor=color.new(#1C2428, 0), text_size=txtSize)
+    targetText = str.tostring(target, format.mintick)
+    table.cell(setupTable, 1, 14, targetText, text_color=color.new(#4CAF50, 0), bgcolor=color.new(#1C2428, 0), text_size=txtSize)
+    targetAtrText = str.tostring(rrRatio, "#.#") + "R (" + str.tostring(targetDistance, format.mintick) + ")"
+    table.cell(setupTable, 2, 14, targetAtrText, text_color=color.new(#B0BEC5, 0), bgcolor=color.new(#1C2428, 0), text_size=txtSize)
+    
+    // ========== ENTRY ZONE (ATR-ONLY) ==========
+    table.cell(setupTable, 0, 15, "Entry Zone", text_color=color.new(#E8E8E8, 0), bgcolor=color.new(#263238, 0), text_size=txtSize)
+    entryText = str.tostring(entryZoneLow, format.mintick) + " - " + str.tostring(entryZoneHigh, format.mintick)
+    table.cell(setupTable, 1, 15, entryText, text_color=color.new(#64B5F6, 0), bgcolor=color.new(#263238, 0), text_size=txtSize)
+    entryAtrText = "±" + str.tostring(entryZoneMultiplier, "#.#") + "× ATR"
+    table.cell(setupTable, 2, 15, entryAtrText, text_color=color.new(#B0BEC5, 0), bgcolor=color.new(#263238, 0), text_size=txtSize)
+    
+    // ========== KO DISTANCE (ATR-ONLY) ==========
+    table.cell(setupTable, 0, 16, "Min KO Distance", text_color=color.new(#E8E8E8, 0), bgcolor=color.new(#1C2428, 0), text_size=txtSize)
+    koText = str.tostring(koMinDistance, format.mintick)
+    table.cell(setupTable, 1, 16, koText, text_color=color.new(#FF5722, 0), bgcolor=color.new(#1C2428, 0), text_size=txtSize)
+    koAtrText = str.tostring(koMultiplier, "#.#") + "× ATR"
+    table.cell(setupTable, 2, 16, koAtrText, text_color=color.new(#B0BEC5, 0), bgcolor=color.new(#1C2428, 0), text_size=txtSize)
+
+// ============================================================================
+// CHART VISUAL ELEMENTS
+// ============================================================================
+
+// Declare persistent line and label variables
+var line ema8Line = na
+var label ema8Label = na
+var line ema55Line = na
+var label ema55Label = na
+var box entryBox = na
+var label entryLabel = na
+var line stopLine = na
+var label stopLabel = na
+var line targetLine = na
+var label targetLabel = na
+
+// Delete old objects before creating new ones
+if barstate.islast
+    // Delete old invalidation lines/labels
+    if not na(ema8Line)
+        line.delete(ema8Line)
+    if not na(ema8Label)
+        label.delete(ema8Label)
+    if not na(ema55Line)
+        line.delete(ema55Line)
+    if not na(ema55Label)
+        label.delete(ema55Label)
+    
+    // Delete old entry zone
+    if not na(entryBox)
+        box.delete(entryBox)
+    if not na(entryLabel)
+        label.delete(entryLabel)
+    
+    // Delete old stop/target lines
+    if not na(stopLine)
+        line.delete(stopLine)
+    if not na(stopLabel)
+        label.delete(stopLabel)
+    if not na(targetLine)
+        line.delete(targetLine)
+    if not na(targetLabel)
+        label.delete(targetLabel)
+
+// Invalidation lines
+if showInvalidationLines and barstate.islast
+    // Fast EMA (warning level)
+    ema8Line := line.new(bar_index - 50, ema8, bar_index + 10, ema8, color=color.new(#FFC107, 0), width=1, style=line.style_dashed, extend=extend.right)
+    ema8Label := label.new(bar_index, ema8, "⚠️ EMA8 WARN", style=label.style_label_left, color=color.new(#FFC107, 70), textcolor=color.new(#FFFFFF, 0), size=size.small)
+    
+    // Slow EMA (stop level)
+    ema55Line := line.new(bar_index - 50, ema55, bar_index + 10, ema55, color=color.new(#F44336, 0), width=2, style=line.style_solid, extend=extend.right)
+    ema55Label := label.new(bar_index, ema55, "🛑 EMA55 STOP", style=label.style_label_left, color=color.new(#F44336, 70), textcolor=color.new(#FFFFFF, 0), size=size.small)
+
+// Entry zone box
+if showEntryZone and barstate.islast and validSetup
+    entryBox := box.new(bar_index - 5, entryZoneHigh, bar_index + 20, entryZoneLow, border_color=color.new(#64B5F6, 0), bgcolor=color.new(#64B5F6, 90), extend=extend.right, border_width=1, border_style=line.style_dashed)
+    entryLabel := label.new(bar_index, entryZoneHigh, "ENTRY ZONE", style=label.style_label_down, color=color.new(#64B5F6, 70), textcolor=color.new(#FFFFFF, 0), size=size.small)
+
+// Stop and target lines
+if showRiskLines and barstate.islast and validSetup
+    // Stop loss line
+    stopLine := line.new(bar_index, stopLoss, bar_index + 20, stopLoss, color=color.new(#F44336, 0), width=1, style=line.style_solid, extend=extend.right)
+    stopLabel := label.new(bar_index + 20, stopLoss, "STOP", style=label.style_label_right, color=color.new(#F44336, 70), textcolor=color.new(#FFFFFF, 0), size=size.small)
+    
+    // Target line
+    targetLine := line.new(bar_index, target, bar_index + 20, target, color=color.new(#4CAF50, 0), width=1, style=line.style_solid, extend=extend.right)
+    targetLabel := label.new(bar_index + 20, target, "TARGET", style=label.style_label_right, color=color.new(#4CAF50, 70), textcolor=color.new(#FFFFFF, 0), size=size.small)
+
+// ============================================================================
+// LEGEND TABLE (OPTIONAL)
+// ============================================================================
+
+var table legendTable = table.new(position.bottom_left, 2, 12, border_width=1, border_color=color.new(#3A3A3A, 0), frame_color=color.new(#3A3A3A, 0), frame_width=1)
+
+if barstate.islast and showLegend
+    txtSize = tableSize == "auto" ? size.auto : tableSize == "tiny" ? size.tiny : tableSize == "small" ? size.small : tableSize == "normal" ? size.normal : size.large
+    
+    table.cell(legendTable, 0, 0, "SETUP VALIDATOR v3.1 - QUICK REFERENCE", text_color=color.new(#FFFFFF, 0), bgcolor=color.new(#37474F, 0), text_size=txtSize)
+    table.merge_cells(legendTable, 0, 0, 1, 0)
+    
+    // Binary decision rule
+    table.cell(legendTable, 0, 1, "VALID SETUP:", text_color=color.new(#4CAF50, 0), bgcolor=color.new(#263238, 0), text_size=txtSize)
+    table.cell(legendTable, 1, 1, "ALL 7 criteria must PASS (7/7 only)", text_color=color.new(#FFFFFF, 0), bgcolor=color.new(#263238, 0), text_size=txtSize)
+    
+    // 7 Criteria summary
+    table.cell(legendTable, 0, 2, "7 CRITERIA:", text_color=color.new(#64B5F6, 0), bgcolor=color.new(#1C2428, 0), text_size=txtSize)
+    table.cell(legendTable, 1, 2, "ADX, EMA, CMF, Gap, ATR, Daily, 4H", text_color=color.new(#B0BEC5, 0), bgcolor=color.new(#1C2428, 0), text_size=txtSize)
+    
+    // System status meanings
+    table.cell(legendTable, 0, 3, "ACTIVE:", text_color=color.new(#4CAF50, 0), bgcolor=color.new(#263238, 0), text_size=txtSize)
+    table.cell(legendTable, 1, 3, "Full 100 EUR positions allowed", text_color=color.new(#B0BEC5, 0), bgcolor=color.new(#263238, 0), text_size=txtSize)
+    
+    table.cell(legendTable, 0, 4, "RESTRICTED:", text_color=color.new(#FFC107, 0), bgcolor=color.new(#1C2428, 0), text_size=txtSize)
+    table.cell(legendTable, 1, 4, "Best setups only, 75 EUR max", text_color=color.new(#B0BEC5, 0), bgcolor=color.new(#1C2428, 0), text_size=txtSize)
+    
+    // ATR Regime adjustments (ATR-ONLY)
+    table.cell(legendTable, 0, 5, "LOW Regime:", text_color=color.new(#64B5F6, 0), bgcolor=color.new(#263238, 0), text_size=txtSize)
+    table.cell(legendTable, 1, 5, "100 EUR, 0.8× ATR stop, 1.3R target", text_color=color.new(#B0BEC5, 0), bgcolor=color.new(#263238, 0), text_size=txtSize)
+    
+    table.cell(legendTable, 0, 6, "NORMAL Regime:", text_color=color.new(#4CAF50, 0), bgcolor=color.new(#1C2428, 0), text_size=txtSize)
+    table.cell(legendTable, 1, 6, "100 EUR, 1.2× ATR stop, 1.5R target", text_color=color.new(#B0BEC5, 0), bgcolor=color.new(#1C2428, 0), text_size=txtSize)
+    
+    table.cell(legendTable, 0, 7, "HIGH Regime:", text_color=color.new(#F44336, 0), bgcolor=color.new(#263238, 0), text_size=txtSize)
+    table.cell(legendTable, 1, 7, "50 EUR, 1.5× ATR stop, 1.5R target", text_color=color.new(#B0BEC5, 0), bgcolor=color.new(#263238, 0), text_size=txtSize)
+    
+    // Invalidation rules
+    table.cell(legendTable, 0, 8, "⚠️ EMA8 Breach:", text_color=color.new(#FFC107, 0), bgcolor=color.new(#1C2428, 0), text_size=txtSize)
+    table.cell(legendTable, 1, 8, "Tighten stop, trend weakening", text_color=color.new(#B0BEC5, 0), bgcolor=color.new(#1C2428, 0), text_size=txtSize)
+    
+    table.cell(legendTable, 0, 9, "🛑 EMA55 Breach:", text_color=color.new(#F44336, 0), bgcolor=color.new(#263238, 0), text_size=txtSize)
+    table.cell(legendTable, 1, 9, "EXIT immediately, setup invalidated", text_color=color.new(#B0BEC5, 0), bgcolor=color.new(#263238, 0), text_size=txtSize)
+    
+    // Entry zone
+    table.cell(legendTable, 0, 10, "Entry Zone:", text_color=color.new(#64B5F6, 0), bgcolor=color.new(#1C2428, 0), text_size=txtSize)
+    table.cell(legendTable, 1, 10, "Blue box = ±0.5× ATR optimal range", text_color=color.new(#B0BEC5, 0), bgcolor=color.new(#1C2428, 0), text_size=txtSize)
+    
+    // Framework rule
+    table.cell(legendTable, 0, 11, "FRAMEWORK RULE:", text_color=color.new(#FFD54F, 0), bgcolor=color.new(#263238, 0), text_size=txtSize)
+    table.cell(legendTable, 1, 11, "Only proceed to SIGNAL stage if 7/7 PASS", text_color=color.new(#FFD54F, 0), bgcolor=color.new(#263238, 0), text_size=txtSize)
+
+if barstate.islast and not showLegend
+    table.clear(legendTable, 0, 0, 1, 11)
+
+// ============================================================================
+// ALERTS
+// ============================================================================
+
+// Alert when setup becomes valid (7/7)
+alertcondition(validSetup and not validSetup[1], title="✓ Setup Valid (7/7)", message="SETUP VALID (7/7): All criteria passed - Check panel for details")
+
+// Alert when setup becomes invalid
+alertcondition(not validSetup and validSetup[1], title="✗ Setup Invalidated", message="SETUP INVALIDATED: One or more criteria failed - Check panel")
+
+// Alert when EMA8 breached (warning)
+alertcondition(ema8Cross, title="⚠️ EMA8 Breach (Warning)", message="WARNING: Price breached EMA8 - Consider tightening stop")
+
+// Alert when EMA55 breached (stop)
+alertcondition(ema55Cross, title="🛑 EMA55 Breach (STOP)", message="STOP: Price breached EMA55 - EXIT IMMEDIATELY")
+
+// Alert when ADX drops below threshold
+alertcondition(ta.cross(adx, adxThreshold), title="⚠️ ADX Crossed Threshold", message="WARNING: ADX crossed 25 threshold - Trend strength changed")
+
+// ============================================================================
+// END OF INDICATOR
+// ============================================================================
+
+// CTA-READY VERSION 3.1 - ATR-ONLY DISPLAY
+// Created: 2025-11-14 02:00 CET
+// 
+// CRITICAL UPDATE v3.1: Removed ALL "pips" references
+// - Pure ATR multiples throughout (0.8×, 1.2×, 1.5×, 2.5×, 3.5×)
+// - Universal across all instruments (forex, indices, commodities)
+// - Framework v1.6 compliant - ATR-relative, not pips-absolute
+// - Cleaner display with actual distances shown in parentheses
+// 
+// ALL 7 CRITERIA IMPLEMENTED:
+// 1. ADX >= 25 (Trend Strength)
+// 2. EMA Alignment (8>21>55 or 8<21<55)
+// 3. CMF >= +10/-10 (4H timeframe)
+// 4. Gap Ratio 0.5-2.0× ATR
+// 5. ATR Regime (INFO ONLY, adjusts risk)
+// 6. Daily Regime CALM TREND + alignment
+// 7. 4H Regime CALM TREND + alignment
+// 
+// Features:
+// - Binary 7/7 decision prominently displayed
+// - All thresholds visible for verification
+// - Clear system status (ACTIVE/RESTRICTED)
+// - Complete risk parameters (position, stop, target, entry zone, KO distance)
+// - Chart visual elements for instant recognition
+// - Consistent text sizing throughout table
+// - Readable label text (white on colored backgrounds)
+// - No ambiguous terminology
+// - Regime-adjusted risk parameters per Framework v1.6
+// - Alert conditions for all key events

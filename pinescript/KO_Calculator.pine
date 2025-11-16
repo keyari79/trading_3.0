@@ -1,0 +1,877 @@
+//@version=6
+indicator("KO Certificate Calculator v4.15", overlay=false, precision=2)
+
+// ============================================================================
+// KO CERTIFICATE CALCULATOR - SINGLE CONSOLIDATED TABLE
+// ============================================================================
+// Version: 4.15
+// Date: November 16, 2025 18:15 CET
+// Purpose: Consolidate redundant tables into single comprehensive display
+//
+// Changes in v4.15 (CONSOLIDATION):
+// - REMOVED: Separate "Trade Visualization" table (left side)
+// - MERGED: All active position tracking into main table
+// - ADDED: Current P&L and R-Multiple to main table (when active)
+// - ADDED: Time tracking to main table (expanded Position Status row)
+// - RESULT: Single comprehensive table, no redundancy
+//
+// Changes in v4.14:
+// - CHANGED: Inactive trade lines start from 2 days back with dotted style
+// - CHANGED: Active trade lines start from entry bar with solid style
+//
+// Changes in v4.13:
+// - COMBINED: Single "KO Distance (ATR)" row
+//
+// Features:
+// - 32 certificates across 16 instruments (all user tradables)
+// - Dynamic currency conversion (EUR/USD, EUR/JPY, EUR/CHF, EUR/CAD)
+// - Complete ATR transparency: Underlying → Certificate derivation
+// - Framework-based stop AND target calculation
+// - Active/Inactive position handling with captured entry conditions
+// - Pre-trade and in-trade visualization
+// - Complete risk/reward display
+// - Framework 2.2.0 full compliance
+// ============================================================================
+
+// ============================================================================
+// QUICK REFERENCE TABLE - ALL TRADABLE INSTRUMENTS
+// ============================================================================
+// FOREX PAIRS (8)
+// EUR/USD      | OANDA:EURUSD    | EUR/USD    | 100.00       | 1.05 - 1.15
+// USD/JPY      | OANDA:USDJPY    | EUR/JPY    | 100.00       | 145 - 160
+// EUR/CHF      | OANDA:EURCHF    | EUR/CHF    | 100.00       | 0.92 - 0.96
+// EUR/JPY      | OANDA:EURJPY    | EUR/JPY    | 100.00       | 155 - 165
+// EUR/CAD      | OANDA:EURCAD    | EUR/CAD    | 100.00       | 1.45 - 1.55
+// USD/CAD      | OANDA:USDCAD    | EUR/CAD    | 100.00       | 1.35 - 1.40
+// USD/CHF      | OANDA:USDCHF    | EUR/CHF    | 100.00       | 0.85 - 0.90
+// GBP/USD      | OANDA:GBPUSD    | EUR/USD    | 100.00       | 1.25 - 1.30
+//
+// COMMODITIES (4)
+// Gold         | OANDA:XAUUSD    | EUR/USD    | 0.10 or 100  | 2500 - 2700
+// Silver       | OANDA:XAGUSD    | EUR/USD    | 100.00       | 28 - 35
+// Copper       | FX:COPPER       | EUR/USD    | 100.00       | 4.00 - 4.50
+// Oil (WTI)    | OANDA:WTICOUSD  | EUR/USD    | 100.00       | 65 - 85
+//
+// INDICES (4)
+// S&P 500      | OANDA:SPX500USD | EUR/USD    | 0.10         | 5800 - 6000
+// NASDAQ       | OANDA:NAS100USD | EUR/USD    | 0.10         | 20000 - 21000
+// US30 (Dow)   | OANDA:US30USD   | EUR/USD    | 0.10         | 43000 - 44000
+// DAX 40       | OANDA:DE30EUR   | 1.0 (EUR)  | 0.10         | 19000 - 20000
+// ============================================================================
+
+// ============================================================================
+// CERTIFICATE SELECTION
+// ============================================================================
+selectedCert = input.string("NONE", "Certificate", options=["NONE", "EUR/USD Long", "EUR/USD Short", "USD/JPY Long", "USD/JPY Short", "EUR/CHF Long", "EUR/CHF Short", "EUR/JPY Long", "EUR/JPY Short", "EUR/CAD Long", "EUR/CAD Short", "USD/CAD Long", "USD/CAD Short", "USD/CHF Long", "USD/CHF Short", "GBP/USD Long", "GBP/USD Short", "Gold Long", "Gold Short", "Silver Long", "Silver Short", "Copper Long", "Copper Short", "Oil Long", "Oil Short", "S&P 500 Long", "S&P 500 Short", "NASDAQ Long", "NASDAQ Short", "US30 Long", "US30 Short", "DAX40 Long", "DAX40 Short"], tooltip="Select certificate to display and calculate")
+
+// ============================================================================
+// FOREX CERTIFICATES - EUR/USD
+// ============================================================================
+group_eurusd_long = "EUR/USD Long Certificate"
+eurusd_long_strike = input.float(1.0500, "Strike/KO Price", group=group_eurusd_long)
+eurusd_long_ratio = input.float(100.00, "Ratio", group=group_eurusd_long)
+
+group_eurusd_short = "EUR/USD Short Certificate"
+eurusd_short_strike = input.float(1.1000, "Strike/KO Price", group=group_eurusd_short)
+eurusd_short_ratio = input.float(100.00, "Ratio", group=group_eurusd_short)
+
+// ============================================================================
+// FOREX CERTIFICATES - USD/JPY
+// ============================================================================
+group_usdjpy_long = "USD/JPY Long Certificate"
+usdjpy_long_strike = input.float(147.33, "Strike/KO Price (JPY)", group=group_usdjpy_long)
+usdjpy_long_ratio = input.float(100.00, "Ratio", group=group_usdjpy_long)
+
+group_usdjpy_short = "USD/JPY Short Certificate"
+usdjpy_short_strike = input.float(155.00, "Strike/KO Price (JPY)", group=group_usdjpy_short)
+usdjpy_short_ratio = input.float(100.00, "Ratio", group=group_usdjpy_short)
+
+// ============================================================================
+// FOREX CERTIFICATES - EUR/CHF
+// ============================================================================
+group_eurchf_long = "EUR/CHF Long Certificate"
+eurchf_long_strike = input.float(0.9200, "Strike/KO Price (CHF)", group=group_eurchf_long)
+eurchf_long_ratio = input.float(100.00, "Ratio", group=group_eurchf_long)
+
+group_eurchf_short = "EUR/CHF Short Certificate"
+eurchf_short_strike = input.float(0.9600, "Strike/KO Price (CHF)", group=group_eurchf_short)
+eurchf_short_ratio = input.float(100.00, "Ratio", group=group_eurchf_short)
+
+// ============================================================================
+// FOREX CERTIFICATES - EUR/JPY
+// ============================================================================
+group_eurjpy_long = "EUR/JPY Long Certificate"
+eurjpy_long_strike = input.float(155.00, "Strike/KO Price (JPY)", group=group_eurjpy_long)
+eurjpy_long_ratio = input.float(100.00, "Ratio", group=group_eurjpy_long)
+
+group_eurjpy_short = "EUR/JPY Short Certificate"
+eurjpy_short_strike = input.float(165.00, "Strike/KO Price (JPY)", group=group_eurjpy_short)
+eurjpy_short_ratio = input.float(100.00, "Ratio", group=group_eurjpy_short)
+
+// ============================================================================
+// FOREX CERTIFICATES - EUR/CAD
+// ============================================================================
+group_eurcad_long = "EUR/CAD Long Certificate"
+eurcad_long_strike = input.float(1.4500, "Strike/KO Price (CAD)", group=group_eurcad_long)
+eurcad_long_ratio = input.float(100.00, "Ratio", group=group_eurcad_long)
+
+group_eurcad_short = "EUR/CAD Short Certificate"
+eurcad_short_strike = input.float(1.5500, "Strike/KO Price (CAD)", group=group_eurcad_short)
+eurcad_short_ratio = input.float(100.00, "Ratio", group=group_eurcad_short)
+
+// ============================================================================
+// FOREX CERTIFICATES - USD/CAD
+// ============================================================================
+group_usdcad_long = "USD/CAD Long Certificate"
+usdcad_long_strike = input.float(1.3500, "Strike/KO Price (CAD)", group=group_usdcad_long)
+usdcad_long_ratio = input.float(100.00, "Ratio", group=group_usdcad_long)
+
+group_usdcad_short = "USD/CAD Short Certificate"
+usdcad_short_strike = input.float(1.4000, "Strike/KO Price (CAD)", group=group_usdcad_short)
+usdcad_short_ratio = input.float(100.00, "Ratio", group=group_usdcad_short)
+
+// ============================================================================
+// FOREX CERTIFICATES - USD/CHF
+// ============================================================================
+group_usdchf_long = "USD/CHF Long Certificate"
+usdchf_long_strike = input.float(0.8500, "Strike/KO Price (CHF)", group=group_usdchf_long)
+usdchf_long_ratio = input.float(100.00, "Ratio", group=group_usdchf_long)
+
+group_usdchf_short = "USD/CHF Short Certificate"
+usdchf_short_strike = input.float(0.9000, "Strike/KO Price (CHF)", group=group_usdchf_short)
+usdchf_short_ratio = input.float(100.00, "Ratio", group=group_usdchf_short)
+
+// ============================================================================
+// FOREX CERTIFICATES - GBP/USD
+// ============================================================================
+group_gbpusd_long = "GBP/USD Long Certificate"
+gbpusd_long_strike = input.float(1.2500, "Strike/KO Price (USD)", group=group_gbpusd_long)
+gbpusd_long_ratio = input.float(100.00, "Ratio", group=group_gbpusd_long)
+
+group_gbpusd_short = "GBP/USD Short Certificate"
+gbpusd_short_strike = input.float(1.3000, "Strike/KO Price (USD)", group=group_gbpusd_short)
+gbpusd_short_ratio = input.float(100.00, "Ratio", group=group_gbpusd_short)
+
+// ============================================================================
+// COMMODITY CERTIFICATES - GOLD
+// ============================================================================
+group_gold_long = "Gold Long Certificate"
+gold_long_strike = input.float(2500.00, "Strike/KO Price (USD/oz)", group=group_gold_long, tooltip="CRITICAL: Verify ratio - can be 0.10 or 100.00")
+gold_long_ratio = input.float(0.10, "Ratio", group=group_gold_long, tooltip="Check OnVista: 0.10 for some, 100.00 for others")
+
+group_gold_short = "Gold Short Certificate"
+gold_short_strike = input.float(2700.00, "Strike/KO Price (USD/oz)", group=group_gold_short)
+gold_short_ratio = input.float(0.10, "Ratio", group=group_gold_short)
+
+// ============================================================================
+// COMMODITY CERTIFICATES - SILVER
+// ============================================================================
+group_silver_long = "Silver Long Certificate"
+silver_long_strike = input.float(28.00, "Strike/KO Price (USD/oz)", group=group_silver_long)
+silver_long_ratio = input.float(100.00, "Ratio", group=group_silver_long)
+
+group_silver_short = "Silver Short Certificate"
+silver_short_strike = input.float(35.00, "Strike/KO Price (USD/oz)", group=group_silver_short)
+silver_short_ratio = input.float(100.00, "Ratio", group=group_silver_short)
+
+// ============================================================================
+// COMMODITY CERTIFICATES - COPPER
+// ============================================================================
+group_copper_long = "Copper Long Certificate"
+copper_long_strike = input.float(4.00, "Strike/KO Price (USD/lb)", group=group_copper_long)
+copper_long_ratio = input.float(100.00, "Ratio", group=group_copper_long)
+
+group_copper_short = "Copper Short Certificate"
+copper_short_strike = input.float(4.50, "Strike/KO Price (USD/lb)", group=group_copper_short)
+copper_short_ratio = input.float(100.00, "Ratio", group=group_copper_short)
+
+// ============================================================================
+// COMMODITY CERTIFICATES - OIL
+// ============================================================================
+group_oil_long = "Oil Long Certificate"
+oil_long_strike = input.float(65.00, "Strike/KO Price (USD/barrel)", group=group_oil_long)
+oil_long_ratio = input.float(100.00, "Ratio", group=group_oil_long)
+
+group_oil_short = "Oil Short Certificate"
+oil_short_strike = input.float(85.00, "Strike/KO Price (USD/barrel)", group=group_oil_short)
+oil_short_ratio = input.float(100.00, "Ratio", group=group_oil_short)
+
+// ============================================================================
+// INDEX CERTIFICATES - S&P 500
+// ============================================================================
+group_sp500_long = "S&P 500 Long Certificate"
+sp500_long_strike = input.float(5800.00, "Strike/KO Price", group=group_sp500_long)
+sp500_long_ratio = input.float(0.10, "Ratio", group=group_sp500_long, tooltip="Usually 0.10 for indices")
+
+group_sp500_short = "S&P 500 Short Certificate"
+sp500_short_strike = input.float(6000.00, "Strike/KO Price", group=group_sp500_short)
+sp500_short_ratio = input.float(0.10, "Ratio", group=group_sp500_short)
+
+// ============================================================================
+// INDEX CERTIFICATES - NASDAQ
+// ============================================================================
+group_nasdaq_long = "NASDAQ Long Certificate"
+nasdaq_long_strike = input.float(20000.00, "Strike/KO Price", group=group_nasdaq_long)
+nasdaq_long_ratio = input.float(0.10, "Ratio", group=group_nasdaq_long)
+
+group_nasdaq_short = "NASDAQ Short Certificate"
+nasdaq_short_strike = input.float(21000.00, "Strike/KO Price", group=group_nasdaq_short)
+nasdaq_short_ratio = input.float(0.10, "Ratio", group=group_nasdaq_short)
+
+// ============================================================================
+// INDEX CERTIFICATES - US30 (Dow Jones)
+// ============================================================================
+group_us30_long = "US30 Long Certificate"
+us30_long_strike = input.float(43000.00, "Strike/KO Price", group=group_us30_long)
+us30_long_ratio = input.float(0.10, "Ratio", group=group_us30_long)
+
+group_us30_short = "US30 Short Certificate"
+us30_short_strike = input.float(44000.00, "Strike/KO Price", group=group_us30_short)
+us30_short_ratio = input.float(0.10, "Ratio", group=group_us30_short)
+
+// ============================================================================
+// INDEX CERTIFICATES - DAX40
+// ============================================================================
+group_dax40_long = "DAX40 Long Certificate"
+dax40_long_strike = input.float(19000.00, "Strike/KO Price (EUR)", group=group_dax40_long, tooltip="DAX already in EUR - no conversion needed")
+dax40_long_ratio = input.float(0.10, "Ratio", group=group_dax40_long)
+
+group_dax40_short = "DAX40 Short Certificate"
+dax40_short_strike = input.float(20000.00, "Strike/KO Price (EUR)", group=group_dax40_short)
+dax40_short_ratio = input.float(0.10, "Ratio", group=group_dax40_short)
+
+// ============================================================================
+// FRAMEWORK 2.2.0 RISK MANAGEMENT
+// ============================================================================
+group_risk = "Framework 2.2.0 Risk Management"
+enablePositionSizing = input.bool(true, "Enable Position Sizing", group=group_risk)
+riskAmount = input.float(100.0, "Risk Amount (EUR)", minval=1, step=10, group=group_risk, tooltip="€100 standard, €50 in RED regime")
+enableATRMonitoring = input.bool(true, "Enable ATR-Based KO Monitoring", group=group_risk)
+atrPeriod = input.int(14, "ATR Period", minval=1, maxval=100, group=group_risk)
+minKODistance = input.float(2.0, "Minimum KO Distance (× ATR)", minval=0.1, step=0.1, group=group_risk, tooltip="Framework requires ≥ 2.0× ATR")
+
+// ATR Regime Detection (for auto-calculated stops)
+group_regime = "ATR Regime (Daily - Framework v2.2.0)"
+atrTimeframe = input.timeframe("D", "ATR Timeframe", group=group_regime, tooltip="Daily ATR per Framework v2.2.0 - DO NOT CHANGE")
+atrMultiplierGreen = input.float(1.2, "GREEN Regime (1.2× ATR)", minval=0.1, step=0.1, group=group_regime, tooltip="Normal volatility (20-80%) - Framework v2.2.0 standard")
+atrMultiplierYellow = input.float(0.8, "YELLOW Regime (0.8× ATR)", minval=0.1, step=0.1, group=group_regime, tooltip="Low volatility (<20%) - Framework v2.2.0 standard")
+atrMultiplierRed = input.float(1.5, "RED Regime (1.5× ATR)", minval=0.1, step=0.1, group=group_regime, tooltip="High volatility (>80%) - Framework v2.2.0 standard")
+
+// ============================================================================
+// AUTOMATED ENTRY TRACKING - INPUTS ONLY
+// ============================================================================
+group_entry = "Entry Tracking (Automated)"
+enableEntryTracking = input.bool(false, "Enable Entry Tracking", group=group_entry, tooltip="Automatically captures entry price at your entry timestamp and tracks time elapsed")
+entryTimestamp = input.time(timestamp("15 Nov 2025 09:30 +0000"), "Entry Date & Time", group=group_entry, tooltip="Select the date and time when you entered your trade. Uses chart's timezone.")
+manualLotSize = input.int(0, "Lot Size (if active position)", minval=0, group=group_entry, tooltip="Enter number of certificates you actually bought. Leave at 0 if no position.")
+showRiskRewardZones = input.bool(true, "Show Risk/Reward Zones", group=group_entry, tooltip="Shaded areas for stop and target zones")
+
+// ============================================================================
+// BID/ASK SPREAD
+// ============================================================================
+group_spread = "Bid/Ask Spread"
+spreadCents = input.float(1.0, "Spread (Cents)", minval=0.01, step=0.01, group=group_spread, tooltip="Typical: 1-2 cents for liquid certificates")
+
+// ============================================================================
+// PARAMETER SELECTION - USING IF-ELSE FOR READABILITY
+// ============================================================================
+var float strikePrice = 0.0
+var float multiplier = 0.0
+var bool isLong = false
+
+if selectedCert == "EUR/USD Long"
+    strikePrice := eurusd_long_strike
+    multiplier := eurusd_long_ratio
+    isLong := true
+else if selectedCert == "EUR/USD Short"
+    strikePrice := eurusd_short_strike
+    multiplier := eurusd_short_ratio
+    isLong := false
+else if selectedCert == "USD/JPY Long"
+    strikePrice := usdjpy_long_strike
+    multiplier := usdjpy_long_ratio
+    isLong := true
+else if selectedCert == "USD/JPY Short"
+    strikePrice := usdjpy_short_strike
+    multiplier := usdjpy_short_ratio
+    isLong := false
+else if selectedCert == "EUR/CHF Long"
+    strikePrice := eurchf_long_strike
+    multiplier := eurchf_long_ratio
+    isLong := true
+else if selectedCert == "EUR/CHF Short"
+    strikePrice := eurchf_short_strike
+    multiplier := eurchf_short_ratio
+    isLong := false
+else if selectedCert == "EUR/JPY Long"
+    strikePrice := eurjpy_long_strike
+    multiplier := eurjpy_long_ratio
+    isLong := true
+else if selectedCert == "EUR/JPY Short"
+    strikePrice := eurjpy_short_strike
+    multiplier := eurjpy_short_ratio
+    isLong := false
+else if selectedCert == "EUR/CAD Long"
+    strikePrice := eurcad_long_strike
+    multiplier := eurcad_long_ratio
+    isLong := true
+else if selectedCert == "EUR/CAD Short"
+    strikePrice := eurcad_short_strike
+    multiplier := eurcad_short_ratio
+    isLong := false
+else if selectedCert == "USD/CAD Long"
+    strikePrice := usdcad_long_strike
+    multiplier := usdcad_long_ratio
+    isLong := true
+else if selectedCert == "USD/CAD Short"
+    strikePrice := usdcad_short_strike
+    multiplier := usdcad_short_ratio
+    isLong := false
+else if selectedCert == "USD/CHF Long"
+    strikePrice := usdchf_long_strike
+    multiplier := usdchf_long_ratio
+    isLong := true
+else if selectedCert == "USD/CHF Short"
+    strikePrice := usdchf_short_strike
+    multiplier := usdchf_short_ratio
+    isLong := false
+else if selectedCert == "GBP/USD Long"
+    strikePrice := gbpusd_long_strike
+    multiplier := gbpusd_long_ratio
+    isLong := true
+else if selectedCert == "GBP/USD Short"
+    strikePrice := gbpusd_short_strike
+    multiplier := gbpusd_short_ratio
+    isLong := false
+else if selectedCert == "Gold Long"
+    strikePrice := gold_long_strike
+    multiplier := gold_long_ratio
+    isLong := true
+else if selectedCert == "Gold Short"
+    strikePrice := gold_short_strike
+    multiplier := gold_short_ratio
+    isLong := false
+else if selectedCert == "Silver Long"
+    strikePrice := silver_long_strike
+    multiplier := silver_long_ratio
+    isLong := true
+else if selectedCert == "Silver Short"
+    strikePrice := silver_short_strike
+    multiplier := silver_short_ratio
+    isLong := false
+else if selectedCert == "Copper Long"
+    strikePrice := copper_long_strike
+    multiplier := copper_long_ratio
+    isLong := true
+else if selectedCert == "Copper Short"
+    strikePrice := copper_short_strike
+    multiplier := copper_short_ratio
+    isLong := false
+else if selectedCert == "Oil Long"
+    strikePrice := oil_long_strike
+    multiplier := oil_long_ratio
+    isLong := true
+else if selectedCert == "Oil Short"
+    strikePrice := oil_short_strike
+    multiplier := oil_short_ratio
+    isLong := false
+else if selectedCert == "S&P 500 Long"
+    strikePrice := sp500_long_strike
+    multiplier := sp500_long_ratio
+    isLong := true
+else if selectedCert == "S&P 500 Short"
+    strikePrice := sp500_short_strike
+    multiplier := sp500_short_ratio
+    isLong := false
+else if selectedCert == "NASDAQ Long"
+    strikePrice := nasdaq_long_strike
+    multiplier := nasdaq_long_ratio
+    isLong := true
+else if selectedCert == "NASDAQ Short"
+    strikePrice := nasdaq_short_strike
+    multiplier := nasdaq_short_ratio
+    isLong := false
+else if selectedCert == "US30 Long"
+    strikePrice := us30_long_strike
+    multiplier := us30_long_ratio
+    isLong := true
+else if selectedCert == "US30 Short"
+    strikePrice := us30_short_strike
+    multiplier := us30_short_ratio
+    isLong := false
+else if selectedCert == "DAX40 Long"
+    strikePrice := dax40_long_strike
+    multiplier := dax40_long_ratio
+    isLong := true
+else if selectedCert == "DAX40 Short"
+    strikePrice := dax40_short_strike
+    multiplier := dax40_short_ratio
+    isLong := false
+else
+    strikePrice := 0.0
+    multiplier := 0.0
+    isLong := false
+
+// ============================================================================
+// UNDERLYING SYMBOL MAPPING
+// ============================================================================
+getUnderlyingSymbol(string cert) =>
+    var string symbol = ""
+    if cert == "EUR/USD Long" or cert == "EUR/USD Short"
+        symbol := "OANDA:EURUSD"
+    else if cert == "USD/JPY Long" or cert == "USD/JPY Short"
+        symbol := "OANDA:USDJPY"
+    else if cert == "EUR/CHF Long" or cert == "EUR/CHF Short"
+        symbol := "OANDA:EURCHF"
+    else if cert == "EUR/JPY Long" or cert == "EUR/JPY Short"
+        symbol := "OANDA:EURJPY"
+    else if cert == "EUR/CAD Long" or cert == "EUR/CAD Short"
+        symbol := "OANDA:EURCAD"
+    else if cert == "USD/CAD Long" or cert == "USD/CAD Short"
+        symbol := "OANDA:USDCAD"
+    else if cert == "USD/CHF Long" or cert == "USD/CHF Short"
+        symbol := "OANDA:USDCHF"
+    else if cert == "GBP/USD Long" or cert == "GBP/USD Short"
+        symbol := "OANDA:GBPUSD"
+    else if cert == "Gold Long" or cert == "Gold Short"
+        symbol := "OANDA:XAUUSD"
+    else if cert == "Silver Long" or cert == "Silver Short"
+        symbol := "OANDA:XAGUSD"
+    else if cert == "Copper Long" or cert == "Copper Short"
+        symbol := "FX:COPPER"
+    else if cert == "Oil Long" or cert == "Oil Short"
+        symbol := "OANDA:WTICOUSD"
+    else if cert == "S&P 500 Long" or cert == "S&P 500 Short"
+        symbol := "OANDA:SPX500USD"
+    else if cert == "NASDAQ Long" or cert == "NASDAQ Short"
+        symbol := "OANDA:NAS100USD"
+    else if cert == "US30 Long" or cert == "US30 Short"
+        symbol := "OANDA:US30USD"
+    else if cert == "DAX40 Long" or cert == "DAX40 Short"
+        symbol := "OANDA:DE30EUR"
+    else
+        symbol := ""
+    symbol
+
+underlyingSymbol = getUnderlyingSymbol(selectedCert)
+
+// ============================================================================
+// CURRENCY CONVERSION RATES - ALL FOUR NEEDED
+// ============================================================================
+eurusdRate = selectedCert != "NONE" ? request.security("OANDA:EURUSD", timeframe.period, close) : na
+eurjpyRate = selectedCert != "NONE" ? request.security("OANDA:EURJPY", timeframe.period, close) : na
+eurchfRate = selectedCert != "NONE" ? request.security("OANDA:EURCHF", timeframe.period, close) : na
+eurcadRate = selectedCert != "NONE" ? request.security("OANDA:EURCAD", timeframe.period, close) : na
+
+// ============================================================================
+// CONVERSION RATE SELECTION LOGIC
+// ============================================================================
+getConversionRate(string cert) =>
+    var float rate = 1.0
+    if str.contains(cert, "USD/JPY") or str.contains(cert, "EUR/JPY")
+        rate := eurjpyRate
+    else if str.contains(cert, "EUR/CHF") or str.contains(cert, "USD/CHF")
+        rate := eurchfRate
+    else if str.contains(cert, "EUR/CAD") or str.contains(cert, "USD/CAD")
+        rate := eurcadRate
+    else if str.contains(cert, "DAX40")
+        rate := 1.0
+    else
+        rate := eurusdRate
+    rate
+
+conversionRate = getConversionRate(selectedCert)
+
+// ============================================================================
+// UNDERLYING PRICE FETCHING
+// ============================================================================
+underlyingPrice = selectedCert != "NONE" ? request.security(underlyingSymbol, timeframe.period, close) : na
+
+// ============================================================================
+// ATR-BASED AUTO STOP DISTANCE CALCULATION
+// ============================================================================
+underlyingATR = selectedCert != "NONE" ? request.security(underlyingSymbol, atrTimeframe, ta.atr(atrPeriod)) : na
+atrMA = selectedCert != "NONE" ? request.security(underlyingSymbol, atrTimeframe, ta.sma(ta.atr(atrPeriod), 20)) : na
+atrRatioToMA = selectedCert != "NONE" ? underlyingATR / atrMA : na
+
+// Derive Certificate's Daily ATR from Underlying's Daily ATR
+// Step 1: Convert underlying ATR to EUR
+// Step 2: Scale by certificate ratio
+// This represents the certificate's actual daily volatility in EUR
+certificateATR = selectedCert != "NONE" ? (underlyingATR / conversionRate) * multiplier : na
+
+var string currentRegime = "YELLOW"
+if selectedCert != "NONE"
+    if atrRatioToMA < 0.8
+        currentRegime := "GREEN"
+    else if atrRatioToMA > 1.2
+        currentRegime := "RED"
+    else
+        currentRegime := "YELLOW"
+
+atrMultiplier = currentRegime == "GREEN" ? atrMultiplierGreen : currentRegime == "RED" ? atrMultiplierRed : atrMultiplierYellow
+
+// Target R-multiple based on regime (Framework v2.2.0)
+targetRMultiple = currentRegime == "GREEN" ? 1.5 : currentRegime == "RED" ? 1.5 : 1.3
+
+stopDistanceUnderlying = selectedCert != "NONE" ? underlyingATR * atrMultiplier : na
+
+// ============================================================================
+// CERTIFICATE PRICE CALCULATION WITH CURRENCY CONVERSION
+// ============================================================================
+intrinsicValueUnderlying = selectedCert != "NONE" ? (isLong ? math.max(0, underlyingPrice - strikePrice) : math.max(0, strikePrice - underlyingPrice)) : na
+intrinsicValueEUR = selectedCert != "NONE" ? intrinsicValueUnderlying / conversionRate : na
+baseCertPrice = selectedCert != "NONE" ? intrinsicValueEUR * multiplier : na
+
+spreadEUR = spreadCents / 100
+certPriceMid = baseCertPrice
+certPriceBid = selectedCert != "NONE" ? certPriceMid - (spreadEUR / 2) : na
+certPriceAsk = selectedCert != "NONE" ? certPriceMid + (spreadEUR / 2) : na
+
+// ============================================================================
+// AUTOMATED ENTRY TRACKING - CAPTURE LOGIC (v4.10)
+// ============================================================================
+// Capture entry price, stop distance, and target distance when we first see time >= entry timestamp
+var float capturedEntryPrice = na
+var int capturedEntryTime = 0
+var float capturedStopDistance = na
+var float capturedTargetDistance = na
+
+// Convert distances to certificate terms BEFORE capturing
+stopDistanceEUR = selectedCert != "NONE" ? stopDistanceUnderlying / conversionRate : na
+stopDistanceCert = selectedCert != "NONE" ? stopDistanceEUR * multiplier : na
+
+targetDistanceUnderlying = selectedCert != "NONE" ? stopDistanceUnderlying * targetRMultiple : na
+targetDistanceEUR = selectedCert != "NONE" ? stopDistanceEUR * targetRMultiple : na
+targetDistanceCert = selectedCert != "NONE" ? stopDistanceCert * targetRMultiple : na
+
+if enableEntryTracking and na(capturedEntryPrice) and time >= entryTimestamp and selectedCert != "NONE"
+    capturedEntryPrice := certPriceMid
+    capturedEntryTime := time
+    capturedStopDistance := stopDistanceCert
+    capturedTargetDistance := targetDistanceCert
+
+// Use captured values for all calculations
+entryPrice = enableEntryTracking ? capturedEntryPrice : 0.0
+
+// Auto-calculate time in trade (minutes since entry)
+timeInTrade = enableEntryTracking and not na(capturedEntryPrice) and time >= capturedEntryTime ? 
+     math.floor((time - capturedEntryTime) / 60000) : 0
+
+// ============================================================================
+// KNOCKOUT DISTANCE CALCULATIONS (v4.13 - SINGLE MEASUREMENT)
+// ============================================================================
+distanceToKO = selectedCert != "NONE" ? (isLong ? ((underlyingPrice - strikePrice) / underlyingPrice * 100) : ((strikePrice - underlyingPrice) / underlyingPrice * 100)) : na
+
+// KO Distance in ATR terms (same for underlying and certificate due to proportionality)
+koDistanceInATR = selectedCert != "NONE" ? math.abs(underlyingPrice - strikePrice) / underlyingATR : na
+
+knockoutWarning5Percent = selectedCert != "NONE" and distanceToKO < 5.0 and distanceToKO > 0
+knockoutWarningATR = selectedCert != "NONE" and enableATRMonitoring and koDistanceInATR < minKODistance and koDistanceInATR > 0
+isKnockedOut = selectedCert != "NONE" and ((isLong and underlyingPrice <= strikePrice) or (not isLong and underlyingPrice >= strikePrice))
+
+// ============================================================================
+// POSITION SIZING - ACTIVE VS INACTIVE LOGIC (v4.10)
+// ============================================================================
+// Calculate units needed for inactive positions
+unitsNeeded = selectedCert != "NONE" and enablePositionSizing ? math.floor(riskAmount / stopDistanceCert) : na
+
+// Determine if we have an active position
+hasActivePosition = enableEntryTracking and manualLotSize > 0 and entryPrice > 0
+
+// Lot size: Manual if active, calculated if inactive
+actualLotSize = hasActivePosition ? manualLotSize : (selectedCert != "NONE" and enablePositionSizing ? unitsNeeded : na)
+
+// Position cost calculation
+// Active: lotSize × entryPrice (captured at entry timestamp)
+// Inactive: lotSize × current ask price
+positionCostActive = hasActivePosition ? manualLotSize * entryPrice : na
+positionCostInactive = not hasActivePosition and selectedCert != "NONE" and enablePositionSizing ? unitsNeeded * certPriceAsk : na
+finalPositionCost = hasActivePosition ? positionCostActive : positionCostInactive
+
+// Risk calculation (v4.10)
+// Active: lotSize × CAPTURED stopDistance (from entry time)
+// Inactive: calculated to be ~€100
+actualRiskActive = hasActivePosition and not na(capturedStopDistance) ? manualLotSize * capturedStopDistance : na
+actualRiskInactive = not hasActivePosition and selectedCert != "NONE" and enablePositionSizing ? unitsNeeded * stopDistanceCert : na
+finalActualRisk = hasActivePosition ? actualRiskActive : actualRiskInactive
+
+// Expected profit calculation (v4.10)
+// Active: lotSize × CAPTURED targetDistance (from entry time)
+// Inactive: uses current target distance
+expectedProfitActive = hasActivePosition and not na(capturedTargetDistance) ? manualLotSize * capturedTargetDistance : na
+expectedProfitInactive = not hasActivePosition and selectedCert != "NONE" and enablePositionSizing ? unitsNeeded * targetDistanceCert : na
+finalExpectedProfit = hasActivePosition ? expectedProfitActive : expectedProfitInactive
+
+// ============================================================================
+// TAKE PROFIT CALCULATION (Framework v2.2.0)
+// ============================================================================
+// Target price levels for LONG/SHORT
+// For LONG: Entry + Target Distance
+// For SHORT: Entry - Target Distance (price goes down for profit)
+targetPriceUnderlying = selectedCert != "NONE" ? (isLong ? underlyingPrice + targetDistanceUnderlying : underlyingPrice - targetDistanceUnderlying) : na
+targetPriceCert = selectedCert != "NONE" ? certPriceMid + targetDistanceCert : na
+
+// ============================================================================
+// STOP LOSS AND TAKE PROFIT PRICES (Active vs Inactive)
+// ============================================================================
+// If ACTIVE position: Fixed prices based on entry and CAPTURED distances
+// If INACTIVE: Dynamic prices based on current bar
+
+// Stop Loss Price (Certificate) - v4.10
+stopLossPriceActive = hasActivePosition and not na(capturedStopDistance) ? entryPrice - capturedStopDistance : na
+stopLossPriceInactive = not hasActivePosition and selectedCert != "NONE" ? certPriceMid - stopDistanceCert : na
+finalStopLossPrice = hasActivePosition ? stopLossPriceActive : stopLossPriceInactive
+
+// Take Profit Price (Certificate) - v4.10
+takeProfitPriceActive = hasActivePosition and not na(capturedTargetDistance) ? entryPrice + capturedTargetDistance : na
+takeProfitPriceInactive = not hasActivePosition and selectedCert != "NONE" ? certPriceMid + targetDistanceCert : na
+finalTakeProfitPrice = hasActivePosition ? takeProfitPriceActive : takeProfitPriceInactive
+
+// ============================================================================
+// TRADE VISUALIZATION CALCULATIONS
+// ============================================================================
+stopPrice = enableEntryTracking and entryPrice > 0 and not na(capturedStopDistance) ? entryPrice - capturedStopDistance : na
+targetPrice = enableEntryTracking and entryPrice > 0 and not na(capturedTargetDistance) ? entryPrice + capturedTargetDistance : na
+riskEUR = enableEntryTracking and entryPrice > 0 and unitsNeeded > 0 and not na(capturedStopDistance) ? unitsNeeded * capturedStopDistance : na
+rewardEUR = enableEntryTracking and entryPrice > 0 and unitsNeeded > 0 and not na(capturedTargetDistance) ? unitsNeeded * capturedTargetDistance : na
+rrRatio = enableEntryTracking and entryPrice > 0 and riskEUR > 0 ? rewardEUR / riskEUR : na
+currentPL = enableEntryTracking and entryPrice > 0 and unitsNeeded > 0 ? unitsNeeded * (certPriceMid - entryPrice) : na
+currentRMultiple = enableEntryTracking and entryPrice > 0 and riskEUR > 0 ? currentPL / riskEUR : na
+maxTradeMinutes = 60
+timeRemaining = enableEntryTracking and timeInTrade > 0 ? maxTradeMinutes - timeInTrade : na
+timeWarning = enableEntryTracking and timeInTrade > 0 and timeRemaining <= 10
+
+// ============================================================================
+// VISUAL PLOTS - CERTIFICATE CANDLESTICKS (2 DECIMAL PRECISION)
+// ============================================================================
+certOpen = selectedCert != "NONE" ? request.security(underlyingSymbol, timeframe.period, open) : na
+certHigh = selectedCert != "NONE" ? request.security(underlyingSymbol, timeframe.period, high) : na
+certLow = selectedCert != "NONE" ? request.security(underlyingSymbol, timeframe.period, low) : na
+certClose = selectedCert != "NONE" ? request.security(underlyingSymbol, timeframe.period, close) : na
+
+calculateCertPrice(float underlyingVal) =>
+    float intrinsic = isLong ? math.max(0, underlyingVal - strikePrice) : math.max(0, strikePrice - underlyingVal)
+    float intrinsicEUR = intrinsic / conversionRate
+    intrinsicEUR * multiplier
+
+certPriceOpen = selectedCert != "NONE" ? calculateCertPrice(certOpen) : na
+certPriceHigh = selectedCert != "NONE" ? calculateCertPrice(certHigh) : na
+certPriceLow = selectedCert != "NONE" ? calculateCertPrice(certLow) : na
+certPriceClose = selectedCert != "NONE" ? calculateCertPrice(certClose) : na
+
+plotcandle(certPriceOpen, certPriceHigh, certPriceLow, certPriceClose, "Certificate Price", color=certPriceClose >= certPriceOpen ? color.new(color.green, 0) : color.new(color.red, 0), wickcolor=certPriceClose >= certPriceOpen ? color.new(color.green, 0) : color.new(color.red, 0), bordercolor=certPriceClose >= certPriceOpen ? color.new(color.green, 0) : color.new(color.red, 0))
+
+// Bid/Ask lines hidden - visible in table instead
+plot(selectedCert != "NONE" ? certPriceBid : na, "Bid Line", color=color.new(color.orange, 50), linewidth=1, style=plot.style_line, display=display.none)
+plot(selectedCert != "NONE" ? certPriceAsk : na, "Ask Line", color=color.new(color.blue, 50), linewidth=1, style=plot.style_line, display=display.none)
+
+// ============================================================================
+// TRADE VISUALIZATION - ENTRY/STOP/TARGET LINES (v4.14)
+// ============================================================================
+// Calculate start bar index based on position status
+var int lineStartBar = 0
+var int entryBarIndex = 0
+
+// Capture entry bar index when position becomes active
+if enableEntryTracking and not na(capturedEntryPrice) and time >= capturedEntryTime and entryBarIndex == 0
+    entryBarIndex := bar_index
+
+// Determine line start position
+if hasActivePosition
+    // Active: Start from entry bar (closest to entry timestamp)
+    lineStartBar := entryBarIndex > 0 ? entryBarIndex : bar_index - 50
+else
+    // Inactive: Start from 2 days back
+    // Calculate approximate bars for 2 days based on current timeframe
+    int msPerBar = timeframe.in_seconds() * 1000
+    int twoDaysMs = 2 * 24 * 60 * 60 * 1000
+    int barsIn2Days = math.floor(twoDaysMs / msPerBar)
+    lineStartBar := bar_index - barsIn2Days
+
+// Line end position (same for both)
+int lineEndBar = bar_index + 3
+
+// Drawing logic
+var line entryLine = na
+var line stopLine = na
+var line targetLine = na
+
+if selectedCert != "NONE" and barstate.islast
+    // Delete old lines
+    if not na(entryLine)
+        line.delete(entryLine)
+    if not na(stopLine)
+        line.delete(stopLine)
+    if not na(targetLine)
+        line.delete(targetLine)
+    
+    if hasActivePosition and entryPrice > 0 and stopPrice > 0 and targetPrice > 0
+        // ACTIVE POSITION: Solid lines from entry bar
+        entryLine := line.new(lineStartBar, entryPrice, lineEndBar, entryPrice, 
+             color=color.new(color.white, 0), width=2, style=line.style_solid)
+        stopLine := line.new(lineStartBar, stopPrice, lineEndBar, stopPrice, 
+             color=color.new(color.red, 0), width=2, style=line.style_solid)
+        targetLine := line.new(lineStartBar, targetPrice, lineEndBar, targetPrice, 
+             color=color.new(color.green, 0), width=2, style=line.style_solid)
+    else if not hasActivePosition
+        // INACTIVE POSITION: Dotted lines from 2 days back showing hypothetical levels
+        float hypotheticalStop = certPriceMid - stopDistanceCert
+        float hypotheticalTarget = certPriceMid + targetDistanceCert
+        
+        stopLine := line.new(lineStartBar, hypotheticalStop, lineEndBar, hypotheticalStop, 
+             color=color.new(color.red, 0), width=2, style=line.style_dotted)
+        targetLine := line.new(lineStartBar, hypotheticalTarget, lineEndBar, hypotheticalTarget, 
+             color=color.new(color.green, 0), width=2, style=line.style_dotted)
+
+riskZoneTop = enableEntryTracking and showRiskRewardZones and entryPrice > 0 ? entryPrice : na
+riskZoneBottom = enableEntryTracking and showRiskRewardZones and entryPrice > 0 ? stopPrice : na
+rewardZoneTop = enableEntryTracking and showRiskRewardZones and entryPrice > 0 ? targetPrice : na
+rewardZoneBottom = enableEntryTracking and showRiskRewardZones and entryPrice > 0 ? entryPrice : na
+
+fill(plot(riskZoneTop, display=display.none), plot(riskZoneBottom, display=display.none), color=color.new(color.red, 90), title="Risk Zone")
+fill(plot(rewardZoneTop, display=display.none), plot(rewardZoneBottom, display=display.none), color=color.new(color.green, 90), title="Reward Zone")
+
+bgcolor(isKnockedOut ? color.new(color.red, 70) : knockoutWarningATR ? color.new(color.orange, 90) : knockoutWarning5Percent ? color.new(color.yellow, 95) : na, title="KO Warning Zones")
+bgcolor(timeWarning ? color.new(color.purple, 95) : na, title="Time Warning")
+
+// ============================================================================
+// SINGLE CONSOLIDATED TABLE (v4.15)
+// ============================================================================
+// Dynamic row count based on active position
+var int baseRows = 15  // Minimum rows for all scenarios
+var int activeExtraRows = 2  // Additional rows when position is active (P&L, R-Multiple)
+var int totalRows = hasActivePosition ? baseRows + activeExtraRows : baseRows
+
+var table certTable = table.new(position.top_right, 2, 17, border_width=1)
+
+if barstate.islast and selectedCert != "NONE"
+    var int rowIdx = 0
+    
+    // ========================================================================
+    // SECTION 1: CERTIFICATE INFORMATION
+    // ========================================================================
+    table.cell(certTable, 0, rowIdx, "═══ CERTIFICATE INFO ═══", text_color=color.yellow, bgcolor=color.new(color.blue, 50), text_size=size.normal)
+    table.cell(certTable, 1, rowIdx, selectedCert, bgcolor=color.new(color.blue, 50), text_color=color.white, text_size=size.normal)
+    rowIdx += 1
+    
+    // Underlying
+    table.cell(certTable, 0, rowIdx, "Underlying:", text_color=color.white, text_size=size.normal)
+    table.cell(certTable, 1, rowIdx, underlyingSymbol, text_color=color.white, text_size=size.normal)
+    rowIdx += 1
+    
+    // Position Status with Time
+    table.cell(certTable, 0, rowIdx, "Position Status:", text_color=color.white, text_size=size.normal)
+    var string positionStatusText = "Inactive"
+    var color positionStatusColor = color.new(color.gray, 80)
+    
+    if hasActivePosition and timeInTrade > 0
+        // Time-based color coding
+        if timeRemaining <= 0
+            positionStatusText := "⛔ EXIT NOW (" + str.tostring(timeInTrade, "#") + " min)"
+            positionStatusColor := color.new(color.red, 0)
+        else if timeRemaining <= 10
+            positionStatusText := "🚨 CLOSE SOON (" + str.tostring(timeRemaining, "#") + " min left)"
+            positionStatusColor := color.new(color.orange, 0)
+        else
+            positionStatusText := "Active (" + str.tostring(timeInTrade, "#") + " min, " + str.tostring(timeRemaining, "#") + " left)"
+            positionStatusColor := color.new(color.green, 50)
+    
+    table.cell(certTable, 1, rowIdx, positionStatusText, text_color=color.white, bgcolor=positionStatusColor, text_size=size.normal)
+    rowIdx += 1
+    
+    // Direction / Ratio
+    table.cell(certTable, 0, rowIdx, "Direction / Ratio:", text_color=color.white, text_size=size.normal)
+    directionText = isLong ? "LONG" : "SHORT"
+    table.cell(certTable, 1, rowIdx, directionText + " / " + str.tostring(multiplier, "#.##"), text_color=color.white, text_size=size.normal)
+    rowIdx += 1
+    
+    // Certificate Price
+    table.cell(certTable, 0, rowIdx, "Certificate Price:", text_color=color.white, text_size=size.normal)
+    table.cell(certTable, 1, rowIdx, str.tostring(certPriceMid, "#.##") + " EUR", text_color=color.white, text_size=size.normal)
+    rowIdx += 1
+    
+    // Entry Price (only if active)
+    if hasActivePosition
+        table.cell(certTable, 0, rowIdx, "Entry Price:", text_color=color.white, text_size=size.normal)
+        table.cell(certTable, 1, rowIdx, str.tostring(entryPrice, "#.##") + " EUR", text_color=color.white, text_size=size.normal)
+        rowIdx += 1
+    
+    // KO Distance
+    table.cell(certTable, 0, rowIdx, "KO Distance (ATR):", text_color=color.white, text_size=size.normal, tooltip="Daily ATR multiples until knockout")
+    koColorATR = knockoutWarningATR ? color.new(color.red, 0) : color.new(color.green, 70)
+    table.cell(certTable, 1, rowIdx, str.tostring(koDistanceInATR, "#.##") + "× ATR", text_color=color.white, bgcolor=koColorATR, text_size=size.normal, tooltip="Framework requires ≥2.0× ATR")
+    rowIdx += 1
+    
+    // ========================================================================
+    // SECTION 2: ENTRY CONDITION
+    // ========================================================================
+    table.cell(certTable, 0, rowIdx, "═══ ENTRY CONDITION ═══", text_color=color.yellow, bgcolor=color.new(color.purple, 50), text_size=size.normal)
+    table.cell(certTable, 1, rowIdx, "", bgcolor=color.new(color.purple, 50))
+    rowIdx += 1
+    
+    // Pre-trigger Check
+    table.cell(certTable, 0, rowIdx, "Pre-trigger Check:", text_color=color.white, text_size=size.normal, tooltip="Placeholder for future logic")
+    table.cell(certTable, 1, rowIdx, "N/A", text_color=color.white, text_size=size.normal)
+    rowIdx += 1
+    
+    // Regime
+    table.cell(certTable, 0, rowIdx, "ATR Regime (Underlying):", text_color=color.white, text_size=size.normal, tooltip="Volatility regime based on underlying's Daily ATR")
+    regimeColor = currentRegime == "GREEN" ? color.new(color.green, 70) : currentRegime == "RED" ? color.new(color.red, 70) : color.new(color.yellow, 70)
+    regimeText = currentRegime + " (" + str.tostring(atrMultiplier, "#.#") + "× stop)"
+    table.cell(certTable, 1, rowIdx, regimeText, text_color=color.white, bgcolor=regimeColor, text_size=size.normal)
+    rowIdx += 1
+    
+    // ========================================================================
+    // SECTION 3: TRADE PLAN
+    // ========================================================================
+    table.cell(certTable, 0, rowIdx, "═══ TRADE PLAN ═══", text_color=color.yellow, bgcolor=color.new(color.green, 50), text_size=size.normal)
+    table.cell(certTable, 1, rowIdx, "", bgcolor=color.new(color.green, 50))
+    rowIdx += 1
+    
+    // Stop Loss Price
+    table.cell(certTable, 0, rowIdx, "Stop Loss Price:", text_color=color.white, text_size=size.normal, tooltip="Certificate stop price")
+    var string stopStatusLabel = hasActivePosition ? " (FIXED)" : " (dynamic)"
+    table.cell(certTable, 1, rowIdx, str.tostring(finalStopLossPrice, "#.##") + " EUR" + stopStatusLabel, text_color=color.white, bgcolor=color.new(color.red, 70), text_size=size.normal)
+    rowIdx += 1
+    
+    // Take Profit Price
+    table.cell(certTable, 0, rowIdx, "Take Profit Price:", text_color=color.white, text_size=size.normal, tooltip="Certificate target price")
+    var string tpStatusLabel = hasActivePosition ? " (FIXED)" : " (dynamic)"
+    tpText = str.tostring(finalTakeProfitPrice, "#.##") + " EUR" + tpStatusLabel + " [" + str.tostring(targetRMultiple, "#.#") + "R]"
+    table.cell(certTable, 1, rowIdx, tpText, text_color=color.white, bgcolor=color.new(color.green, 70), text_size=size.normal)
+    rowIdx += 1
+    
+    // Lot Size
+    table.cell(certTable, 0, rowIdx, "Lot Size:", text_color=color.white, text_size=size.normal)
+    var string lotStatusLabel = hasActivePosition ? " (manual)" : " (calc)"
+    table.cell(certTable, 1, rowIdx, str.tostring(actualLotSize, "#") + " units" + lotStatusLabel, text_color=color.white, text_size=size.normal)
+    rowIdx += 1
+    
+    // Position Cost
+    table.cell(certTable, 0, rowIdx, "Position Cost:", text_color=color.white, text_size=size.normal)
+    table.cell(certTable, 1, rowIdx, "€" + str.tostring(finalPositionCost, "#.##"), text_color=color.white, text_size=size.normal)
+    rowIdx += 1
+    
+    // Risk / Profit
+    table.cell(certTable, 0, rowIdx, "Risk / Profit:", text_color=color.white, text_size=size.normal, tooltip="EUR at risk / EUR profit potential")
+    table.cell(certTable, 1, rowIdx, "€" + str.tostring(finalActualRisk, "#.##") + " / €" + str.tostring(finalExpectedProfit, "#.##"), text_color=color.white, text_size=size.normal)
+    rowIdx += 1
+    
+    // Current P&L (only if active)
+    if hasActivePosition
+        table.cell(certTable, 0, rowIdx, "Current P&L:", text_color=color.white, text_size=size.normal)
+        plColor = currentPL > 0 ? color.new(color.green, 70) : currentPL < 0 ? color.new(color.red, 70) : na
+        plText = (currentPL > 0 ? "+" : "") + str.tostring(currentPL, "#.##") + " EUR [" + str.tostring(currentRMultiple, "#.##") + "R]"
+        table.cell(certTable, 1, rowIdx, plText, text_color=color.white, bgcolor=plColor, text_size=size.normal)
+        rowIdx += 1
+
+// ============================================================================
+// ALERT CONDITIONS
+// ============================================================================
+alertcondition(knockoutWarningATR, "Framework Alert: KO Too Close", "⚠️ KO distance below 2.0× ATR - Framework 2.2.0 non-compliant")
+alertcondition(knockoutWarning5Percent, "Near Knockout (5%)", "Certificate within 5% of knockout level")
+alertcondition(isLong and underlyingPrice <= strikePrice, "Long Certificate Knocked Out", "🚨 Long certificate knocked out")
+alertcondition(not isLong and underlyingPrice >= strikePrice, "Short Certificate Knocked Out", "🚨 Short certificate knocked out")
+alertcondition(enableEntryTracking and timeInTrade > 0 and timeRemaining <= 10 and timeRemaining > 0, "Time Warning: Exit Soon", "🚨 Less than 10 minutes remaining - prepare to exit")
+alertcondition(enableEntryTracking and timeInTrade > 0 and timeRemaining <= 0, "Time Alert: Force Exit", "⛔ 60-minute limit reached - exit immediately")

@@ -1,0 +1,773 @@
+//@version=6
+indicator("Assessment - Daily Market Overview v2.2", shorttitle="FW Assessment v2.2", overlay=false)
+
+// ============================================================================
+// ASSESSMENT STAGE - ENHANCED WITH SCORING & RANKING
+// Framework v1.8 - Daily Timeframe
+// Created: November 14, 2025 15:15 CET
+// ============================================================================
+// LEFT TABLE (middle_left): Tradeable Instruments with SCORING & RANKING
+// RIGHT TABLE (middle_right): Sentiment (Awareness) - ENHANCED with signals
+// ENHANCEMENTS:
+// - Quality Score calculation per instrument (0-8 points)
+// - Automatic ranking (1-15)
+// - Top 5 visual highlighting
+// - Optional filtering of RANGING instruments
+// - v2.2: Added intermarket signals, trading focus, and session info
+// ============================================================================
+
+// ============================================================================
+// INPUT PARAMETERS
+// ============================================================================
+
+// --- Table Display ---
+string tableSize = input.string("normal", "Table Size", options=["auto", "tiny", "small", "normal", "large", "huge"], group="Display")
+bool hideRanging = input.bool(false, "Hide RANGING Instruments", group="Display")
+bool highlightTop5 = input.bool(true, "Highlight Top 5", group="Display")
+
+// --- Tradeable Instruments: FOREX ---
+string forex1 = input.symbol("FX:EURUSD", "Forex 1", group="💱 FOREX")
+string forex2 = input.symbol("FX:EURCAD", "Forex 2", group="💱 FOREX")
+string forex3 = input.symbol("FX:EURJPY", "Forex 3", group="💱 FOREX")
+string forex4 = input.symbol("FX:EURCHF", "Forex 4", group="💱 FOREX")
+string forex5 = input.symbol("FX:USDCAD", "Forex 5", group="💱 FOREX")
+string forex6 = input.symbol("FX:USDCHF", "Forex 6", group="💱 FOREX")
+string forex7 = input.symbol("FX:GBPUSD", "Forex 7", group="💱 FOREX")
+
+// --- Tradeable Instruments: COMMODITIES ---
+string commodity1 = input.symbol("FX:XAUUSD", "Commodity 1 (Gold)", group="🥇 COMMODITIES")
+string commodity2 = input.symbol("FX:XAGUSD", "Commodity 2 (Silver)", group="🥇 COMMODITIES")
+string commodity3 = input.symbol("CAPITALCOM:COPPER", "Commodity 3 (Copper)", group="🥇 COMMODITIES")
+string commodity4 = input.symbol("FX:USOIL", "Commodity 4 (Oil)", group="🥇 COMMODITIES")
+
+// --- Tradeable Instruments: INDICES ---
+string index1 = input.symbol("BLUEBERRY:SP500", "Index 1 (S&P 500)", group="📈 INDICES")
+string index2 = input.symbol("IG:NASDAQ", "Index 2 (Nasdaq)", group="📈 INDICES")
+string index3 = input.symbol("GOMARKETS:DAX40", "Index 3 (DAX)", group="📈 INDICES")
+string index4 = input.symbol("FX:US30", "Index 4 (Dow Jones)", group="📈 INDICES")
+
+// --- ATR Settings ---
+int atrLength = input.int(14, "ATR Length", minval=5, maxval=50, group="⚡ ATR Settings")
+int atrPercentileLookback = input.int(100, "ATR Percentile Lookback", minval=20, maxval=252, group="⚡ ATR Settings")
+float atrLowThreshold = input.float(20.0, "Low Threshold (%)", minval=0, maxval=100, step=5, group="⚡ ATR Settings")
+float atrHighThreshold = input.float(80.0, "High Threshold (%)", minval=0, maxval=100, step=5, group="⚡ ATR Settings")
+
+// --- Volume Settings ---
+int volumeMALength = input.int(20, "Volume MA Length", minval=5, maxval=100, group="📊 Volume Settings")
+
+// --- ADX Settings ---
+int adxLength = input.int(14, "ADX Length", minval=5, maxval=50, group="📈 ADX Settings")
+float adxTrendingThreshold = input.float(25.0, "Trending Threshold", minval=10, maxval=50, step=5, group="📈 ADX Settings")
+float adxStrongThreshold = input.float(30.0, "Strong Trend Threshold", minval=20, maxval=50, step=5, group="📈 ADX Settings")
+float adxRangingThreshold = input.float(20.0, "Ranging Threshold", minval=10, maxval=30, step=5, group="📈 ADX Settings")
+
+// --- Scoring Settings ---
+int structureTrendingPoints = input.int(3, "TRENDING Points", minval=0, maxval=5, group="🎯 Scoring")
+int structureTransitionalPoints = input.int(1, "TRANSITIONAL Points", minval=0, maxval=5, group="🎯 Scoring")
+int adxStrongPoints = input.int(2, "Strong ADX Points (≥30)", minval=0, maxval=5, group="🎯 Scoring")
+int adxAcceptablePoints = input.int(1, "Acceptable ADX Points (25-30)", minval=0, maxval=5, group="🎯 Scoring")
+int volumeHighPoints = input.int(2, "High Volume Points (>120%)", minval=0, maxval=5, group="🎯 Scoring")
+int volumeNormalPoints = input.int(1, "Normal Volume Points (100-120%)", minval=0, maxval=5, group="🎯 Scoring")
+int regimeGreenBonus = input.int(1, "GREEN Regime Bonus", minval=0, maxval=3, group="🎯 Scoring")
+int regimeRedPenalty = input.int(-1, "RED Regime Penalty", minval=-3, maxval=0, group="🎯 Scoring")
+
+// --- Sentiment Settings ---
+float vixCalm = input.float(20.0, "VIX Calm Level", minval=10.0, maxval=30.0, step=1.0, group="🌍 Sentiment")
+float vixElevated = input.float(25.0, "VIX Elevated Level", minval=20.0, maxval=40.0, step=1.0, group="🌍 Sentiment")
+int dxyMAPeriod = input.int(50, "DXY MA Period", minval=20, maxval=200, group="🌍 Sentiment")
+int spxMAPeriod = input.int(20, "S&P 500 MA Period", minval=10, maxval=100, group="🌍 Sentiment")
+
+// ============================================================================
+// SESSION DETECTION (NEW for v2.2)
+// ============================================================================
+
+// Get current hour in exchange timezone
+currentHour = hour(time, "GMT+1") // CET timezone
+
+// Determine current session
+string currentSession = currentHour >= 1 and currentHour < 9 ? "ASIA" : currentHour >= 9 and currentHour < 13 ? "LONDON" : currentHour >= 13 and currentHour < 22 ? "NY" : "OFF-HOURS"
+
+// Determine session strength  
+string sessionStrength = currentSession == "LONDON" or currentSession == "NY" ? "PRIME" : currentSession == "ASIA" ? "ACCEPTABLE" : "WEAK"
+
+// ============================================================================
+// FETCH TRADEABLE INSTRUMENT DATA - HARDCODED PER INSTRUMENT (PRESERVED)
+// ============================================================================
+
+// --- FOREX 1: EURUSD ---
+[atr_fx1, atrPerc_fx1, vol_fx1, volMA_fx1] = request.security(forex1, "D", [ta.atr(atrLength), ta.percentrank(ta.atr(atrLength), atrPercentileLookback), volume, ta.sma(volume, volumeMALength)], lookahead=barmerge.lookahead_off)
+[plusDI_fx1, minusDI_fx1, adx_fx1] = request.security(forex1, "D", ta.dmi(adxLength, adxLength), lookahead=barmerge.lookahead_off)
+[close_fx1, change_fx1] = request.security(forex1, "D", [close, (close - close[1]) / close[1] * 100], lookahead=barmerge.lookahead_off)
+regime_fx1 = atrPerc_fx1 >= atrHighThreshold ? "RED" : atrPerc_fx1 <= atrLowThreshold ? "YELLOW" : "GREEN"
+volRatio_fx1 = vol_fx1 / volMA_fx1 * 100
+structure_fx1 = adx_fx1 > adxTrendingThreshold and plusDI_fx1 > minusDI_fx1 ? "TRENDING UP" : adx_fx1 > adxTrendingThreshold and minusDI_fx1 > plusDI_fx1 ? "TRENDING DOWN" : adx_fx1 < adxRangingThreshold ? "RANGING" : "TRANSITIONAL"
+
+// --- FOREX 2: EURCAD ---
+[atr_fx2, atrPerc_fx2, vol_fx2, volMA_fx2] = request.security(forex2, "D", [ta.atr(atrLength), ta.percentrank(ta.atr(atrLength), atrPercentileLookback), volume, ta.sma(volume, volumeMALength)], lookahead=barmerge.lookahead_off)
+[plusDI_fx2, minusDI_fx2, adx_fx2] = request.security(forex2, "D", ta.dmi(adxLength, adxLength), lookahead=barmerge.lookahead_off)
+[close_fx2, change_fx2] = request.security(forex2, "D", [close, (close - close[1]) / close[1] * 100], lookahead=barmerge.lookahead_off)
+regime_fx2 = atrPerc_fx2 >= atrHighThreshold ? "RED" : atrPerc_fx2 <= atrLowThreshold ? "YELLOW" : "GREEN"
+volRatio_fx2 = vol_fx2 / volMA_fx2 * 100
+structure_fx2 = adx_fx2 > adxTrendingThreshold and plusDI_fx2 > minusDI_fx2 ? "TRENDING UP" : adx_fx2 > adxTrendingThreshold and minusDI_fx2 > plusDI_fx2 ? "TRENDING DOWN" : adx_fx2 < adxRangingThreshold ? "RANGING" : "TRANSITIONAL"
+
+// --- FOREX 3: EURJPY ---
+[atr_fx3, atrPerc_fx3, vol_fx3, volMA_fx3] = request.security(forex3, "D", [ta.atr(atrLength), ta.percentrank(ta.atr(atrLength), atrPercentileLookback), volume, ta.sma(volume, volumeMALength)], lookahead=barmerge.lookahead_off)
+[plusDI_fx3, minusDI_fx3, adx_fx3] = request.security(forex3, "D", ta.dmi(adxLength, adxLength), lookahead=barmerge.lookahead_off)
+[close_fx3, change_fx3] = request.security(forex3, "D", [close, (close - close[1]) / close[1] * 100], lookahead=barmerge.lookahead_off)
+regime_fx3 = atrPerc_fx3 >= atrHighThreshold ? "RED" : atrPerc_fx3 <= atrLowThreshold ? "YELLOW" : "GREEN"
+volRatio_fx3 = vol_fx3 / volMA_fx3 * 100
+structure_fx3 = adx_fx3 > adxTrendingThreshold and plusDI_fx3 > minusDI_fx3 ? "TRENDING UP" : adx_fx3 > adxTrendingThreshold and minusDI_fx3 > plusDI_fx3 ? "TRENDING DOWN" : adx_fx3 < adxRangingThreshold ? "RANGING" : "TRANSITIONAL"
+
+// --- FOREX 4: EURCHF ---
+[atr_fx4, atrPerc_fx4, vol_fx4, volMA_fx4] = request.security(forex4, "D", [ta.atr(atrLength), ta.percentrank(ta.atr(atrLength), atrPercentileLookback), volume, ta.sma(volume, volumeMALength)], lookahead=barmerge.lookahead_off)
+[plusDI_fx4, minusDI_fx4, adx_fx4] = request.security(forex4, "D", ta.dmi(adxLength, adxLength), lookahead=barmerge.lookahead_off)
+[close_fx4, change_fx4] = request.security(forex4, "D", [close, (close - close[1]) / close[1] * 100], lookahead=barmerge.lookahead_off)
+regime_fx4 = atrPerc_fx4 >= atrHighThreshold ? "RED" : atrPerc_fx4 <= atrLowThreshold ? "YELLOW" : "GREEN"
+volRatio_fx4 = vol_fx4 / volMA_fx4 * 100
+structure_fx4 = adx_fx4 > adxTrendingThreshold and plusDI_fx4 > minusDI_fx4 ? "TRENDING UP" : adx_fx4 > adxTrendingThreshold and minusDI_fx4 > plusDI_fx4 ? "TRENDING DOWN" : adx_fx4 < adxRangingThreshold ? "RANGING" : "TRANSITIONAL"
+
+// --- FOREX 5: USDCAD ---
+[atr_fx5, atrPerc_fx5, vol_fx5, volMA_fx5] = request.security(forex5, "D", [ta.atr(atrLength), ta.percentrank(ta.atr(atrLength), atrPercentileLookback), volume, ta.sma(volume, volumeMALength)], lookahead=barmerge.lookahead_off)
+[plusDI_fx5, minusDI_fx5, adx_fx5] = request.security(forex5, "D", ta.dmi(adxLength, adxLength), lookahead=barmerge.lookahead_off)
+[close_fx5, change_fx5] = request.security(forex5, "D", [close, (close - close[1]) / close[1] * 100], lookahead=barmerge.lookahead_off)
+regime_fx5 = atrPerc_fx5 >= atrHighThreshold ? "RED" : atrPerc_fx5 <= atrLowThreshold ? "YELLOW" : "GREEN"
+volRatio_fx5 = vol_fx5 / volMA_fx5 * 100
+structure_fx5 = adx_fx5 > adxTrendingThreshold and plusDI_fx5 > minusDI_fx5 ? "TRENDING UP" : adx_fx5 > adxTrendingThreshold and minusDI_fx5 > plusDI_fx5 ? "TRENDING DOWN" : adx_fx5 < adxRangingThreshold ? "RANGING" : "TRANSITIONAL"
+
+// --- FOREX 6: USDCHF ---
+[atr_fx6, atrPerc_fx6, vol_fx6, volMA_fx6] = request.security(forex6, "D", [ta.atr(atrLength), ta.percentrank(ta.atr(atrLength), atrPercentileLookback), volume, ta.sma(volume, volumeMALength)], lookahead=barmerge.lookahead_off)
+[plusDI_fx6, minusDI_fx6, adx_fx6] = request.security(forex6, "D", ta.dmi(adxLength, adxLength), lookahead=barmerge.lookahead_off)
+[close_fx6, change_fx6] = request.security(forex6, "D", [close, (close - close[1]) / close[1] * 100], lookahead=barmerge.lookahead_off)
+regime_fx6 = atrPerc_fx6 >= atrHighThreshold ? "RED" : atrPerc_fx6 <= atrLowThreshold ? "YELLOW" : "GREEN"
+volRatio_fx6 = vol_fx6 / volMA_fx6 * 100
+structure_fx6 = adx_fx6 > adxTrendingThreshold and plusDI_fx6 > minusDI_fx6 ? "TRENDING UP" : adx_fx6 > adxTrendingThreshold and minusDI_fx6 > plusDI_fx6 ? "TRENDING DOWN" : adx_fx6 < adxRangingThreshold ? "RANGING" : "TRANSITIONAL"
+
+// --- FOREX 7: GBPUSD ---
+[atr_fx7, atrPerc_fx7, vol_fx7, volMA_fx7] = request.security(forex7, "D", [ta.atr(atrLength), ta.percentrank(ta.atr(atrLength), atrPercentileLookback), volume, ta.sma(volume, volumeMALength)], lookahead=barmerge.lookahead_off)
+[plusDI_fx7, minusDI_fx7, adx_fx7] = request.security(forex7, "D", ta.dmi(adxLength, adxLength), lookahead=barmerge.lookahead_off)
+[close_fx7, change_fx7] = request.security(forex7, "D", [close, (close - close[1]) / close[1] * 100], lookahead=barmerge.lookahead_off)
+regime_fx7 = atrPerc_fx7 >= atrHighThreshold ? "RED" : atrPerc_fx7 <= atrLowThreshold ? "YELLOW" : "GREEN"
+volRatio_fx7 = vol_fx7 / volMA_fx7 * 100
+structure_fx7 = adx_fx7 > adxTrendingThreshold and plusDI_fx7 > minusDI_fx7 ? "TRENDING UP" : adx_fx7 > adxTrendingThreshold and minusDI_fx7 > plusDI_fx7 ? "TRENDING DOWN" : adx_fx7 < adxRangingThreshold ? "RANGING" : "TRANSITIONAL"
+
+// --- COMMODITY 1: GOLD ---
+[atr_cmd1, atrPerc_cmd1, vol_cmd1, volMA_cmd1] = request.security(commodity1, "D", [ta.atr(atrLength), ta.percentrank(ta.atr(atrLength), atrPercentileLookback), volume, ta.sma(volume, volumeMALength)], lookahead=barmerge.lookahead_off)
+[plusDI_cmd1, minusDI_cmd1, adx_cmd1] = request.security(commodity1, "D", ta.dmi(adxLength, adxLength), lookahead=barmerge.lookahead_off)
+[close_cmd1, change_cmd1] = request.security(commodity1, "D", [close, (close - close[1]) / close[1] * 100], lookahead=barmerge.lookahead_off)
+regime_cmd1 = atrPerc_cmd1 >= atrHighThreshold ? "RED" : atrPerc_cmd1 <= atrLowThreshold ? "YELLOW" : "GREEN"
+volRatio_cmd1 = vol_cmd1 / volMA_cmd1 * 100
+structure_cmd1 = adx_cmd1 > adxTrendingThreshold and plusDI_cmd1 > minusDI_cmd1 ? "TRENDING UP" : adx_cmd1 > adxTrendingThreshold and minusDI_cmd1 > plusDI_cmd1 ? "TRENDING DOWN" : adx_cmd1 < adxRangingThreshold ? "RANGING" : "TRANSITIONAL"
+
+// --- COMMODITY 2: SILVER ---
+[atr_cmd2, atrPerc_cmd2, vol_cmd2, volMA_cmd2] = request.security(commodity2, "D", [ta.atr(atrLength), ta.percentrank(ta.atr(atrLength), atrPercentileLookback), volume, ta.sma(volume, volumeMALength)], lookahead=barmerge.lookahead_off)
+[plusDI_cmd2, minusDI_cmd2, adx_cmd2] = request.security(commodity2, "D", ta.dmi(adxLength, adxLength), lookahead=barmerge.lookahead_off)
+[close_cmd2, change_cmd2] = request.security(commodity2, "D", [close, (close - close[1]) / close[1] * 100], lookahead=barmerge.lookahead_off)
+regime_cmd2 = atrPerc_cmd2 >= atrHighThreshold ? "RED" : atrPerc_cmd2 <= atrLowThreshold ? "YELLOW" : "GREEN"
+volRatio_cmd2 = vol_cmd2 / volMA_cmd2 * 100
+structure_cmd2 = adx_cmd2 > adxTrendingThreshold and plusDI_cmd2 > minusDI_cmd2 ? "TRENDING UP" : adx_cmd2 > adxTrendingThreshold and minusDI_cmd2 > plusDI_cmd2 ? "TRENDING DOWN" : adx_cmd2 < adxRangingThreshold ? "RANGING" : "TRANSITIONAL"
+
+// --- COMMODITY 3: COPPER ---
+[atr_cmd3, atrPerc_cmd3, vol_cmd3, volMA_cmd3] = request.security(commodity3, "D", [ta.atr(atrLength), ta.percentrank(ta.atr(atrLength), atrPercentileLookback), volume, ta.sma(volume, volumeMALength)], lookahead=barmerge.lookahead_off)
+[plusDI_cmd3, minusDI_cmd3, adx_cmd3] = request.security(commodity3, "D", ta.dmi(adxLength, adxLength), lookahead=barmerge.lookahead_off)
+[close_cmd3, change_cmd3] = request.security(commodity3, "D", [close, (close - close[1]) / close[1] * 100], lookahead=barmerge.lookahead_off)
+regime_cmd3 = atrPerc_cmd3 >= atrHighThreshold ? "RED" : atrPerc_cmd3 <= atrLowThreshold ? "YELLOW" : "GREEN"
+volRatio_cmd3 = vol_cmd3 / volMA_cmd3 * 100
+structure_cmd3 = adx_cmd3 > adxTrendingThreshold and plusDI_cmd3 > minusDI_cmd3 ? "TRENDING UP" : adx_cmd3 > adxTrendingThreshold and minusDI_cmd3 > plusDI_cmd3 ? "TRENDING DOWN" : adx_cmd3 < adxRangingThreshold ? "RANGING" : "TRANSITIONAL"
+
+// --- COMMODITY 4: OIL ---
+[atr_cmd4, atrPerc_cmd4, vol_cmd4, volMA_cmd4] = request.security(commodity4, "D", [ta.atr(atrLength), ta.percentrank(ta.atr(atrLength), atrPercentileLookback), volume, ta.sma(volume, volumeMALength)], lookahead=barmerge.lookahead_off)
+[plusDI_cmd4, minusDI_cmd4, adx_cmd4] = request.security(commodity4, "D", ta.dmi(adxLength, adxLength), lookahead=barmerge.lookahead_off)
+[close_cmd4, change_cmd4] = request.security(commodity4, "D", [close, (close - close[1]) / close[1] * 100], lookahead=barmerge.lookahead_off)
+regime_cmd4 = atrPerc_cmd4 >= atrHighThreshold ? "RED" : atrPerc_cmd4 <= atrLowThreshold ? "YELLOW" : "GREEN"
+volRatio_cmd4 = vol_cmd4 / volMA_cmd4 * 100
+structure_cmd4 = adx_cmd4 > adxTrendingThreshold and plusDI_cmd4 > minusDI_cmd4 ? "TRENDING UP" : adx_cmd4 > adxTrendingThreshold and minusDI_cmd4 > plusDI_cmd4 ? "TRENDING DOWN" : adx_cmd4 < adxRangingThreshold ? "RANGING" : "TRANSITIONAL"
+
+// --- INDEX 1: S&P 500 ---
+[atr_idx1, atrPerc_idx1, vol_idx1, volMA_idx1] = request.security(index1, "D", [ta.atr(atrLength), ta.percentrank(ta.atr(atrLength), atrPercentileLookback), volume, ta.sma(volume, volumeMALength)], lookahead=barmerge.lookahead_off)
+[plusDI_idx1, minusDI_idx1, adx_idx1] = request.security(index1, "D", ta.dmi(adxLength, adxLength), lookahead=barmerge.lookahead_off)
+[close_idx1, change_idx1] = request.security(index1, "D", [close, (close - close[1]) / close[1] * 100], lookahead=barmerge.lookahead_off)
+regime_idx1 = atrPerc_idx1 >= atrHighThreshold ? "RED" : atrPerc_idx1 <= atrLowThreshold ? "YELLOW" : "GREEN"
+volRatio_idx1 = vol_idx1 / volMA_idx1 * 100
+structure_idx1 = adx_idx1 > adxTrendingThreshold and plusDI_idx1 > minusDI_idx1 ? "TRENDING UP" : adx_idx1 > adxTrendingThreshold and minusDI_idx1 > plusDI_idx1 ? "TRENDING DOWN" : adx_idx1 < adxRangingThreshold ? "RANGING" : "TRANSITIONAL"
+
+// --- INDEX 2: NASDAQ ---
+[atr_idx2, atrPerc_idx2, vol_idx2, volMA_idx2] = request.security(index2, "D", [ta.atr(atrLength), ta.percentrank(ta.atr(atrLength), atrPercentileLookback), volume, ta.sma(volume, volumeMALength)], lookahead=barmerge.lookahead_off)
+[plusDI_idx2, minusDI_idx2, adx_idx2] = request.security(index2, "D", ta.dmi(adxLength, adxLength), lookahead=barmerge.lookahead_off)
+[close_idx2, change_idx2] = request.security(index2, "D", [close, (close - close[1]) / close[1] * 100], lookahead=barmerge.lookahead_off)
+regime_idx2 = atrPerc_idx2 >= atrHighThreshold ? "RED" : atrPerc_idx2 <= atrLowThreshold ? "YELLOW" : "GREEN"
+volRatio_idx2 = vol_idx2 / volMA_idx2 * 100
+structure_idx2 = adx_idx2 > adxTrendingThreshold and plusDI_idx2 > minusDI_idx2 ? "TRENDING UP" : adx_idx2 > adxTrendingThreshold and minusDI_idx2 > plusDI_idx2 ? "TRENDING DOWN" : adx_idx2 < adxRangingThreshold ? "RANGING" : "TRANSITIONAL"
+
+// --- INDEX 3: DAX ---
+[atr_idx3, atrPerc_idx3, vol_idx3, volMA_idx3] = request.security(index3, "D", [ta.atr(atrLength), ta.percentrank(ta.atr(atrLength), atrPercentileLookback), volume, ta.sma(volume, volumeMALength)], lookahead=barmerge.lookahead_off)
+[plusDI_idx3, minusDI_idx3, adx_idx3] = request.security(index3, "D", ta.dmi(adxLength, adxLength), lookahead=barmerge.lookahead_off)
+[close_idx3, change_idx3] = request.security(index3, "D", [close, (close - close[1]) / close[1] * 100], lookahead=barmerge.lookahead_off)
+regime_idx3 = atrPerc_idx3 >= atrHighThreshold ? "RED" : atrPerc_idx3 <= atrLowThreshold ? "YELLOW" : "GREEN"
+volRatio_idx3 = vol_idx3 / volMA_idx3 * 100
+structure_idx3 = adx_idx3 > adxTrendingThreshold and plusDI_idx3 > minusDI_idx3 ? "TRENDING UP" : adx_idx3 > adxTrendingThreshold and minusDI_idx3 > plusDI_idx3 ? "TRENDING DOWN" : adx_idx3 < adxRangingThreshold ? "RANGING" : "TRANSITIONAL"
+
+// --- INDEX 4: DOW JONES ---
+[atr_idx4, atrPerc_idx4, vol_idx4, volMA_idx4] = request.security(index4, "D", [ta.atr(atrLength), ta.percentrank(ta.atr(atrLength), atrPercentileLookback), volume, ta.sma(volume, volumeMALength)], lookahead=barmerge.lookahead_off)
+[plusDI_idx4, minusDI_idx4, adx_idx4] = request.security(index4, "D", ta.dmi(adxLength, adxLength), lookahead=barmerge.lookahead_off)
+[close_idx4, change_idx4] = request.security(index4, "D", [close, (close - close[1]) / close[1] * 100], lookahead=barmerge.lookahead_off)
+regime_idx4 = atrPerc_idx4 >= atrHighThreshold ? "RED" : atrPerc_idx4 <= atrLowThreshold ? "YELLOW" : "GREEN"
+volRatio_idx4 = vol_idx4 / volMA_idx4 * 100
+structure_idx4 = adx_idx4 > adxTrendingThreshold and plusDI_idx4 > minusDI_idx4 ? "TRENDING UP" : adx_idx4 > adxTrendingThreshold and minusDI_idx4 > plusDI_idx4 ? "TRENDING DOWN" : adx_idx4 < adxRangingThreshold ? "RANGING" : "TRANSITIONAL"
+
+// ============================================================================
+// HELPER FUNCTIONS (MUST BE DEFINED BEFORE USE)
+// ============================================================================
+
+getShortName(string fullSymbol) =>
+    string result = fullSymbol
+    if str.contains(fullSymbol, ":")
+        parts = str.split(fullSymbol, ":")
+        result := array.get(parts, 1)
+    result
+
+getRegimeColor(string regime) =>
+    regime == "GREEN" ? color.new(color.green, 0) : regime == "YELLOW" ? color.new(color.yellow, 0) : color.new(color.red, 0)
+
+getRegimeBgColor(string regime) =>
+    regime == "GREEN" ? color.new(color.green, 85) : regime == "YELLOW" ? color.new(color.yellow, 85) : color.new(color.red, 85)
+
+// Function to check if instrument is in Top 5
+isTop5(int rank, int score) =>
+    rank <= 5 and score > 0
+
+// Function to get row background color
+getRowBgColor(int rank, int score, bool isTop5Highlight) =>
+    if isTop5Highlight and isTop5(rank, score)
+        color.new(#1E3A5F, 0)  // Highlighted blue for Top 5
+    else
+        color.new(#1A1A1A, 0)  // Normal dark background
+
+// ============================================================================
+// QUALITY SCORING LOGIC (PRESERVED)
+// ============================================================================
+
+// Function to calculate quality score for each instrument
+calcQualityScore(string structure, float adx, float volRatio, string regime) =>
+    int score = 0
+    
+    // Structure Score (0-3 points)
+    if str.contains(structure, "TRENDING")
+        score += structureTrendingPoints
+    else if structure == "TRANSITIONAL"
+        score += structureTransitionalPoints
+    // RANGING = 0 points
+    
+    // ADX Score (0-2 points)
+    if adx >= adxStrongThreshold
+        score += adxStrongPoints
+    else if adx >= adxTrendingThreshold
+        score += adxAcceptablePoints
+    
+    // Volume Score (0-2 points)
+    if volRatio > 120
+        score += volumeHighPoints
+    else if volRatio >= 100
+        score += volumeNormalPoints
+    
+    // Regime Bonus/Penalty (-1 to +1 points)
+    if regime == "GREEN"
+        score += regimeGreenBonus
+    else if regime == "RED"
+        score += regimeRedPenalty
+    
+    // Hard filter: If RANGING and hideRanging enabled, score = -999 (will be filtered)
+    if structure == "RANGING" and hideRanging
+        score := -999
+    
+    score
+
+// Calculate scores for all instruments
+score_fx1 = calcQualityScore(structure_fx1, adx_fx1, volRatio_fx1, regime_fx1)
+score_fx2 = calcQualityScore(structure_fx2, adx_fx2, volRatio_fx2, regime_fx2)
+score_fx3 = calcQualityScore(structure_fx3, adx_fx3, volRatio_fx3, regime_fx3)
+score_fx4 = calcQualityScore(structure_fx4, adx_fx4, volRatio_fx4, regime_fx4)
+score_fx5 = calcQualityScore(structure_fx5, adx_fx5, volRatio_fx5, regime_fx5)
+score_fx6 = calcQualityScore(structure_fx6, adx_fx6, volRatio_fx6, regime_fx6)
+score_fx7 = calcQualityScore(structure_fx7, adx_fx7, volRatio_fx7, regime_fx7)
+score_cmd1 = calcQualityScore(structure_cmd1, adx_cmd1, volRatio_cmd1, regime_cmd1)
+score_cmd2 = calcQualityScore(structure_cmd2, adx_cmd2, volRatio_cmd2, regime_cmd2)
+score_cmd3 = calcQualityScore(structure_cmd3, adx_cmd3, volRatio_cmd3, regime_cmd3)
+score_cmd4 = calcQualityScore(structure_cmd4, adx_cmd4, volRatio_cmd4, regime_cmd4)
+score_idx1 = calcQualityScore(structure_idx1, adx_idx1, volRatio_idx1, regime_idx1)
+score_idx2 = calcQualityScore(structure_idx2, adx_idx2, volRatio_idx2, regime_idx2)
+score_idx3 = calcQualityScore(structure_idx3, adx_idx3, volRatio_idx3, regime_idx3)
+score_idx4 = calcQualityScore(structure_idx4, adx_idx4, volRatio_idx4, regime_idx4)
+
+// ============================================================================
+// RANKING LOGIC (PRESERVED WITH ADDITIONS FOR TOP 3 NAMES/STRUCTURES)
+// ============================================================================
+
+// Build arrays for sorting
+var allScores = array.new<float>(15)
+var allIndices = array.new<int>(15)
+var allNames = array.new<string>(15)
+var allStructures = array.new<string>(15)
+var allChanges = array.new<float>(15)
+
+// Set names array
+array.set(allNames, 0, getShortName(forex1))
+array.set(allNames, 1, getShortName(forex2))
+array.set(allNames, 2, getShortName(forex3))
+array.set(allNames, 3, getShortName(forex4))
+array.set(allNames, 4, getShortName(forex5))
+array.set(allNames, 5, getShortName(forex6))
+array.set(allNames, 6, getShortName(forex7))
+array.set(allNames, 7, getShortName(commodity1))
+array.set(allNames, 8, getShortName(commodity2))
+array.set(allNames, 9, getShortName(commodity3))
+array.set(allNames, 10, getShortName(commodity4))
+array.set(allNames, 11, getShortName(index1))
+array.set(allNames, 12, getShortName(index2))
+array.set(allNames, 13, getShortName(index3))
+array.set(allNames, 14, getShortName(index4))
+
+// Set structures array
+array.set(allStructures, 0, structure_fx1)
+array.set(allStructures, 1, structure_fx2)
+array.set(allStructures, 2, structure_fx3)
+array.set(allStructures, 3, structure_fx4)
+array.set(allStructures, 4, structure_fx5)
+array.set(allStructures, 5, structure_fx6)
+array.set(allStructures, 6, structure_fx7)
+array.set(allStructures, 7, structure_cmd1)
+array.set(allStructures, 8, structure_cmd2)
+array.set(allStructures, 9, structure_cmd3)
+array.set(allStructures, 10, structure_cmd4)
+array.set(allStructures, 11, structure_idx1)
+array.set(allStructures, 12, structure_idx2)
+array.set(allStructures, 13, structure_idx3)
+array.set(allStructures, 14, structure_idx4)
+
+// Set changes array
+array.set(allChanges, 0, change_fx1)
+array.set(allChanges, 1, change_fx2)
+array.set(allChanges, 2, change_fx3)
+array.set(allChanges, 3, change_fx4)
+array.set(allChanges, 4, change_fx5)
+array.set(allChanges, 5, change_fx6)
+array.set(allChanges, 6, change_fx7)
+array.set(allChanges, 7, change_cmd1)
+array.set(allChanges, 8, change_cmd2)
+array.set(allChanges, 9, change_cmd3)
+array.set(allChanges, 10, change_cmd4)
+array.set(allChanges, 11, change_idx1)
+array.set(allChanges, 12, change_idx2)
+array.set(allChanges, 13, change_idx3)
+array.set(allChanges, 14, change_idx4)
+
+array.set(allScores, 0, score_fx1)
+array.set(allScores, 1, score_fx2)
+array.set(allScores, 2, score_fx3)
+array.set(allScores, 3, score_fx4)
+array.set(allScores, 4, score_fx5)
+array.set(allScores, 5, score_fx6)
+array.set(allScores, 6, score_fx7)
+array.set(allScores, 7, score_cmd1)
+array.set(allScores, 8, score_cmd2)
+array.set(allScores, 9, score_cmd3)
+array.set(allScores, 10, score_cmd4)
+array.set(allScores, 11, score_idx1)
+array.set(allScores, 12, score_idx2)
+array.set(allScores, 13, score_idx3)
+array.set(allScores, 14, score_idx4)
+
+// Initialize indices
+for i = 0 to 14
+    array.set(allIndices, i, i)
+
+// Simple bubble sort to rank by score (highest to lowest)
+for i = 0 to 13
+    for j = 0 to 13 - i
+        if array.get(allScores, j) < array.get(allScores, j + 1)
+            // Swap scores
+            tempScore = array.get(allScores, j)
+            array.set(allScores, j, array.get(allScores, j + 1))
+            array.set(allScores, j + 1, tempScore)
+            // Swap indices
+            tempIdx = array.get(allIndices, j)
+            array.set(allIndices, j, array.get(allIndices, j + 1))
+            array.set(allIndices, j + 1, tempIdx)
+
+// Calculate ranks (position in sorted array + 1)
+var ranks = array.new<int>(15)
+for i = 0 to 14
+    originalIdx = array.get(allIndices, i)
+    rank = i + 1
+    array.set(ranks, originalIdx, rank)
+
+// Get top 3 for Trading Focus
+top1Idx = array.get(allIndices, 0)
+top2Idx = array.get(allIndices, 1) 
+top3Idx = array.get(allIndices, 2)
+
+top1Name = array.get(allNames, top1Idx)
+top2Name = array.get(allNames, top2Idx)
+top3Name = array.get(allNames, top3Idx)
+
+top1Structure = array.get(allStructures, top1Idx)
+top2Structure = array.get(allStructures, top2Idx)
+top3Structure = array.get(allStructures, top3Idx)
+
+top1Bias = str.contains(top1Structure, "UP") ? "LONG" : str.contains(top1Structure, "DOWN") ? "SHORT" : "NEUTRAL"
+top2Bias = str.contains(top2Structure, "UP") ? "LONG" : str.contains(top2Structure, "DOWN") ? "SHORT" : "NEUTRAL"
+top3Bias = str.contains(top3Structure, "UP") ? "LONG" : str.contains(top3Structure, "DOWN") ? "SHORT" : "NEUTRAL"
+
+top1Change = array.get(allChanges, top1Idx)
+top2Change = array.get(allChanges, top2Idx)
+top3Change = array.get(allChanges, top3Idx)
+
+rank_fx1 = array.get(ranks, 0)
+rank_fx2 = array.get(ranks, 1)
+rank_fx3 = array.get(ranks, 2)
+rank_fx4 = array.get(ranks, 3)
+rank_fx5 = array.get(ranks, 4)
+rank_fx6 = array.get(ranks, 5)
+rank_fx7 = array.get(ranks, 6)
+rank_cmd1 = array.get(ranks, 7)
+rank_cmd2 = array.get(ranks, 8)
+rank_cmd3 = array.get(ranks, 9)
+rank_cmd4 = array.get(ranks, 10)
+rank_idx1 = array.get(ranks, 11)
+rank_idx2 = array.get(ranks, 12)
+rank_idx3 = array.get(ranks, 13)
+rank_idx4 = array.get(ranks, 14)
+
+// ============================================================================
+// FETCH SENTIMENT DATA (ENHANCED for v2.2)
+// ============================================================================
+
+float vixClose = request.security("CBOE:VIX", "D", close, lookahead=barmerge.lookahead_off)
+float dxyClose = request.security("TVC:DXY", "D", close, lookahead=barmerge.lookahead_off)
+float dxyMA = request.security("TVC:DXY", "D", ta.sma(close, dxyMAPeriod), lookahead=barmerge.lookahead_off)
+float spxClose = request.security("SP:SPX", "D", close, lookahead=barmerge.lookahead_off)
+float spxMA = request.security("SP:SPX", "D", ta.sma(close, spxMAPeriod), lookahead=barmerge.lookahead_off)
+
+// Enhanced signals for v2.2
+string vixLevel = vixClose < vixCalm ? "CALM" : vixClose < vixElevated ? "NORMAL" : "ELEVATED"
+string vixSignal = vixClose < vixCalm ? "NORMAL" : vixClose >= vixElevated ? "RISK-OFF" : "CAUTION"
+string dxySignal = dxyClose > dxyMA ? "STRONG $" : "WEAK $"
+string spxSignal = spxClose > spxMA ? "RISK-ON" : "RISK-OFF"
+
+// Overall environment
+int riskOnCount = (vixClose < vixCalm ? 1 : 0) + (dxyClose < dxyMA ? 1 : 0) + (spxClose > spxMA ? 1 : 0)
+string marketEnv = riskOnCount >= 2 ? "RISK-ON" : riskOnCount <= 1 ? "RISK-OFF" : "NEUTRAL"
+
+// ============================================================================
+// LEFT TABLE - TRADEABLE INSTRUMENTS WITH SCORING & RANKING (PRESERVED)
+// ============================================================================
+
+var table tradeTable = table.new(position.middle_left, 13, 20, border_width=1, border_color=color.new(#3A3A3A, 0), frame_color=color.new(#3A3A3A, 0), frame_width=1)
+
+if barstate.islast
+    txtSize = tableSize == "auto" ? size.auto : tableSize == "tiny" ? size.tiny : tableSize == "small" ? size.small : tableSize == "normal" ? size.normal : tableSize == "large" ? size.large : size.huge
+    
+    // MAIN HEADER
+    table.cell(tradeTable, 0, 0, "TRADEABLE INSTRUMENTS - SCORED & RANKED", text_color=color.new(color.white, 0), bgcolor=color.new(#1E3A5F, 0), text_size=txtSize, text_halign=text.align_center)
+    table.merge_cells(tradeTable, 0, 0, 12, 0)
+    
+    // COLUMN HEADERS
+    table.cell(tradeTable, 0, 1, "Rank", text_color=color.new(#E0E0E0, 0), bgcolor=color.new(#2A2A2A, 0), text_size=txtSize)
+    table.cell(tradeTable, 1, 1, "Score", text_color=color.new(#E0E0E0, 0), bgcolor=color.new(#2A2A2A, 0), text_size=txtSize)
+    table.cell(tradeTable, 2, 1, "Instrument", text_color=color.new(#E0E0E0, 0), bgcolor=color.new(#2A2A2A, 0), text_size=txtSize)
+    table.cell(tradeTable, 3, 1, "ATR %ile", text_color=color.new(#E0E0E0, 0), bgcolor=color.new(#2A2A2A, 0), text_size=txtSize)
+    table.cell(tradeTable, 4, 1, "Regime", text_color=color.new(#E0E0E0, 0), bgcolor=color.new(#2A2A2A, 0), text_size=txtSize)
+    table.cell(tradeTable, 5, 1, "Volume", text_color=color.new(#E0E0E0, 0), bgcolor=color.new(#2A2A2A, 0), text_size=txtSize)
+    table.cell(tradeTable, 6, 1, "Vol MA(20)", text_color=color.new(#E0E0E0, 0), bgcolor=color.new(#2A2A2A, 0), text_size=txtSize)
+    table.cell(tradeTable, 7, 1, "Vol Ratio", text_color=color.new(#E0E0E0, 0), bgcolor=color.new(#2A2A2A, 0), text_size=txtSize)
+    table.cell(tradeTable, 8, 1, "ADX(14)", text_color=color.new(#E0E0E0, 0), bgcolor=color.new(#2A2A2A, 0), text_size=txtSize)
+    table.cell(tradeTable, 9, 1, "+DI", text_color=color.new(#E0E0E0, 0), bgcolor=color.new(#2A2A2A, 0), text_size=txtSize)
+    table.cell(tradeTable, 10, 1, "-DI", text_color=color.new(#E0E0E0, 0), bgcolor=color.new(#2A2A2A, 0), text_size=txtSize)
+    table.cell(tradeTable, 11, 1, "Structure", text_color=color.new(#E0E0E0, 0), bgcolor=color.new(#2A2A2A, 0), text_size=txtSize)
+    table.cell(tradeTable, 12, 1, "ATR(14)", text_color=color.new(#E0E0E0, 0), bgcolor=color.new(#2A2A2A, 0), text_size=txtSize)
+    
+    // ========== FOREX SECTION ==========
+    table.cell(tradeTable, 0, 2, "💱 FOREX", text_color=color.new(color.yellow, 0), bgcolor=color.new(#1A1A2A, 0), text_size=txtSize)
+    table.merge_cells(tradeTable, 0, 2, 12, 2)
+    
+    forexInstruments = array.from(forex1, forex2, forex3, forex4, forex5, forex6, forex7)
+    forexAtrs = array.from(atr_fx1, atr_fx2, atr_fx3, atr_fx4, atr_fx5, atr_fx6, atr_fx7)
+    forexAtrPercs = array.from(atrPerc_fx1, atrPerc_fx2, atrPerc_fx3, atrPerc_fx4, atrPerc_fx5, atrPerc_fx6, atrPerc_fx7)
+    forexRegimes = array.from(regime_fx1, regime_fx2, regime_fx3, regime_fx4, regime_fx5, regime_fx6, regime_fx7)
+    forexVols = array.from(vol_fx1, vol_fx2, vol_fx3, vol_fx4, vol_fx5, vol_fx6, vol_fx7)
+    forexVolMAs = array.from(volMA_fx1, volMA_fx2, volMA_fx3, volMA_fx4, volMA_fx5, volMA_fx6, volMA_fx7)
+    forexVolRatios = array.from(volRatio_fx1, volRatio_fx2, volRatio_fx3, volRatio_fx4, volRatio_fx5, volRatio_fx6, volRatio_fx7)
+    forexAdxs = array.from(adx_fx1, adx_fx2, adx_fx3, adx_fx4, adx_fx5, adx_fx6, adx_fx7)
+    forexPlusDIs = array.from(plusDI_fx1, plusDI_fx2, plusDI_fx3, plusDI_fx4, plusDI_fx5, plusDI_fx6, plusDI_fx7)
+    forexMinusDIs = array.from(minusDI_fx1, minusDI_fx2, minusDI_fx3, minusDI_fx4, minusDI_fx5, minusDI_fx6, minusDI_fx7)
+    forexStructures = array.from(structure_fx1, structure_fx2, structure_fx3, structure_fx4, structure_fx5, structure_fx6, structure_fx7)
+    forexScores = array.from(score_fx1, score_fx2, score_fx3, score_fx4, score_fx5, score_fx6, score_fx7)
+    forexRanks = array.from(rank_fx1, rank_fx2, rank_fx3, rank_fx4, rank_fx5, rank_fx6, rank_fx7)
+    
+    for i = 0 to 6
+        scoreVal = array.get(forexScores, i)
+        
+        // Skip row if score is -999 (filtered out)
+        if scoreVal != -999
+            row = i + 3
+            instName = getShortName(array.get(forexInstruments, i))
+            atrVal = array.get(forexAtrs, i)
+            atrPerc = array.get(forexAtrPercs, i)
+            regime = array.get(forexRegimes, i)
+            volVal = array.get(forexVols, i)
+            volMAVal = array.get(forexVolMAs, i)
+            volRatio = array.get(forexVolRatios, i)
+            adxVal = array.get(forexAdxs, i)
+            plusDIVal = array.get(forexPlusDIs, i)
+            minusDIVal = array.get(forexMinusDIs, i)
+            structVal = array.get(forexStructures, i)
+            rankVal = array.get(forexRanks, i)
+            
+            regimeColor = getRegimeColor(regime)
+            regimeBgColor = getRegimeBgColor(regime)
+            volColor = volRatio > 120 ? color.new(color.green, 0) : volRatio < 80 ? color.new(color.orange, 0) : color.new(#B0B0B0, 0)
+            structColor = structVal == "TRENDING UP" ? color.new(color.green, 0) : structVal == "TRENDING DOWN" ? color.new(color.red, 0) : structVal == "RANGING" ? color.new(color.gray, 0) : color.new(color.yellow, 0)
+            
+            rowBg = getRowBgColor(rankVal, scoreVal, highlightTop5)
+            rankColor = isTop5(rankVal, scoreVal) ? color.new(color.yellow, 0) : color.new(#B0B0B0, 0)
+            scoreColor = scoreVal >= 6 ? color.new(color.green, 0) : scoreVal >= 3 ? color.new(color.yellow, 0) : color.new(#B0B0B0, 0)
+            
+            table.cell(tradeTable, 0, row, str.tostring(rankVal), text_color=rankColor, bgcolor=rowBg, text_size=txtSize)
+            table.cell(tradeTable, 1, row, str.tostring(scoreVal), text_color=scoreColor, bgcolor=rowBg, text_size=txtSize)
+            table.cell(tradeTable, 2, row, instName, text_color=color.new(#C0C0C0, 0), bgcolor=rowBg, text_size=txtSize)
+            table.cell(tradeTable, 3, row, str.tostring(atrPerc, "#") + "%", text_color=color.new(#B0B0B0, 0), bgcolor=rowBg, text_size=txtSize)
+            table.cell(tradeTable, 4, row, regime, text_color=regimeColor, bgcolor=regimeBgColor, text_size=txtSize)
+            table.cell(tradeTable, 5, row, str.tostring(volVal, format.volume), text_color=color.new(#B0B0B0, 0), bgcolor=rowBg, text_size=txtSize)
+            table.cell(tradeTable, 6, row, str.tostring(volMAVal, format.volume), text_color=color.new(#B0B0B0, 0), bgcolor=rowBg, text_size=txtSize)
+            table.cell(tradeTable, 7, row, str.tostring(volRatio, "#") + "%", text_color=volColor, bgcolor=rowBg, text_size=txtSize)
+            table.cell(tradeTable, 8, row, str.tostring(adxVal, "#.#"), text_color=color.new(#B0B0B0, 0), bgcolor=rowBg, text_size=txtSize)
+            table.cell(tradeTable, 9, row, str.tostring(plusDIVal, "#.#"), text_color=color.new(color.green, 0), bgcolor=rowBg, text_size=txtSize)
+            table.cell(tradeTable, 10, row, str.tostring(minusDIVal, "#.#"), text_color=color.new(color.red, 0), bgcolor=rowBg, text_size=txtSize)
+            table.cell(tradeTable, 11, row, structVal, text_color=structColor, bgcolor=rowBg, text_size=txtSize)
+            table.cell(tradeTable, 12, row, str.tostring(atrVal, "#.####"), text_color=color.new(#B0B0B0, 0), bgcolor=rowBg, text_size=txtSize)
+    
+    // ========== COMMODITIES SECTION ==========
+    table.cell(tradeTable, 0, 10, "🥇 COMMODITIES", text_color=color.new(color.orange, 0), bgcolor=color.new(#1A1A2A, 0), text_size=txtSize)
+    table.merge_cells(tradeTable, 0, 10, 12, 10)
+    
+    cmdInstruments = array.from(commodity1, commodity2, commodity3, commodity4)
+    cmdAtrs = array.from(atr_cmd1, atr_cmd2, atr_cmd3, atr_cmd4)
+    cmdAtrPercs = array.from(atrPerc_cmd1, atrPerc_cmd2, atrPerc_cmd3, atrPerc_cmd4)
+    cmdRegimes = array.from(regime_cmd1, regime_cmd2, regime_cmd3, regime_cmd4)
+    cmdVols = array.from(vol_cmd1, vol_cmd2, vol_cmd3, vol_cmd4)
+    cmdVolMAs = array.from(volMA_cmd1, volMA_cmd2, volMA_cmd3, volMA_cmd4)
+    cmdVolRatios = array.from(volRatio_cmd1, volRatio_cmd2, volRatio_cmd3, volRatio_cmd4)
+    cmdAdxs = array.from(adx_cmd1, adx_cmd2, adx_cmd3, adx_cmd4)
+    cmdPlusDIs = array.from(plusDI_cmd1, plusDI_cmd2, plusDI_cmd3, plusDI_cmd4)
+    cmdMinusDIs = array.from(minusDI_cmd1, minusDI_cmd2, minusDI_cmd3, minusDI_cmd4)
+    cmdStructures = array.from(structure_cmd1, structure_cmd2, structure_cmd3, structure_cmd4)
+    cmdScores = array.from(score_cmd1, score_cmd2, score_cmd3, score_cmd4)
+    cmdRanks = array.from(rank_cmd1, rank_cmd2, rank_cmd3, rank_cmd4)
+    
+    for i = 0 to 3
+        scoreVal = array.get(cmdScores, i)
+        
+        if scoreVal != -999
+            row = i + 11
+            instName = getShortName(array.get(cmdInstruments, i))
+            atrVal = array.get(cmdAtrs, i)
+            atrPerc = array.get(cmdAtrPercs, i)
+            regime = array.get(cmdRegimes, i)
+            volVal = array.get(cmdVols, i)
+            volMAVal = array.get(cmdVolMAs, i)
+            volRatio = array.get(cmdVolRatios, i)
+            adxVal = array.get(cmdAdxs, i)
+            plusDIVal = array.get(cmdPlusDIs, i)
+            minusDIVal = array.get(cmdMinusDIs, i)
+            structVal = array.get(cmdStructures, i)
+            rankVal = array.get(cmdRanks, i)
+            
+            regimeColor = getRegimeColor(regime)
+            regimeBgColor = getRegimeBgColor(regime)
+            volColor = volRatio > 120 ? color.new(color.green, 0) : volRatio < 80 ? color.new(color.orange, 0) : color.new(#B0B0B0, 0)
+            structColor = structVal == "TRENDING UP" ? color.new(color.green, 0) : structVal == "TRENDING DOWN" ? color.new(color.red, 0) : structVal == "RANGING" ? color.new(color.gray, 0) : color.new(color.yellow, 0)
+            
+            rowBg = getRowBgColor(rankVal, scoreVal, highlightTop5)
+            rankColor = isTop5(rankVal, scoreVal) ? color.new(color.yellow, 0) : color.new(#B0B0B0, 0)
+            scoreColor = scoreVal >= 6 ? color.new(color.green, 0) : scoreVal >= 3 ? color.new(color.yellow, 0) : color.new(#B0B0B0, 0)
+            
+            table.cell(tradeTable, 0, row, str.tostring(rankVal), text_color=rankColor, bgcolor=rowBg, text_size=txtSize)
+            table.cell(tradeTable, 1, row, str.tostring(scoreVal), text_color=scoreColor, bgcolor=rowBg, text_size=txtSize)
+            table.cell(tradeTable, 2, row, instName, text_color=color.new(#C0C0C0, 0), bgcolor=rowBg, text_size=txtSize)
+            table.cell(tradeTable, 3, row, str.tostring(atrPerc, "#") + "%", text_color=color.new(#B0B0B0, 0), bgcolor=rowBg, text_size=txtSize)
+            table.cell(tradeTable, 4, row, regime, text_color=regimeColor, bgcolor=regimeBgColor, text_size=txtSize)
+            table.cell(tradeTable, 5, row, str.tostring(volVal, format.volume), text_color=color.new(#B0B0B0, 0), bgcolor=rowBg, text_size=txtSize)
+            table.cell(tradeTable, 6, row, str.tostring(volMAVal, format.volume), text_color=color.new(#B0B0B0, 0), bgcolor=rowBg, text_size=txtSize)
+            table.cell(tradeTable, 7, row, str.tostring(volRatio, "#") + "%", text_color=volColor, bgcolor=rowBg, text_size=txtSize)
+            table.cell(tradeTable, 8, row, str.tostring(adxVal, "#.#"), text_color=color.new(#B0B0B0, 0), bgcolor=rowBg, text_size=txtSize)
+            table.cell(tradeTable, 9, row, str.tostring(plusDIVal, "#.#"), text_color=color.new(color.green, 0), bgcolor=rowBg, text_size=txtSize)
+            table.cell(tradeTable, 10, row, str.tostring(minusDIVal, "#.#"), text_color=color.new(color.red, 0), bgcolor=rowBg, text_size=txtSize)
+            table.cell(tradeTable, 11, row, structVal, text_color=structColor, bgcolor=rowBg, text_size=txtSize)
+            table.cell(tradeTable, 12, row, str.tostring(atrVal, "#.####"), text_color=color.new(#B0B0B0, 0), bgcolor=rowBg, text_size=txtSize)
+    
+    // ========== INDICES SECTION ==========
+    table.cell(tradeTable, 0, 15, "📈 INDICES", text_color=color.new(color.aqua, 0), bgcolor=color.new(#1A1A2A, 0), text_size=txtSize)
+    table.merge_cells(tradeTable, 0, 15, 12, 15)
+    
+    idxInstruments = array.from(index1, index2, index3, index4)
+    idxAtrs = array.from(atr_idx1, atr_idx2, atr_idx3, atr_idx4)
+    idxAtrPercs = array.from(atrPerc_idx1, atrPerc_idx2, atrPerc_idx3, atrPerc_idx4)
+    idxRegimes = array.from(regime_idx1, regime_idx2, regime_idx3, regime_idx4)
+    idxVols = array.from(vol_idx1, vol_idx2, vol_idx3, vol_idx4)
+    idxVolMAs = array.from(volMA_idx1, volMA_idx2, volMA_idx3, volMA_idx4)
+    idxVolRatios = array.from(volRatio_idx1, volRatio_idx2, volRatio_idx3, volRatio_idx4)
+    idxAdxs = array.from(adx_idx1, adx_idx2, adx_idx3, adx_idx4)
+    idxPlusDIs = array.from(plusDI_idx1, plusDI_idx2, plusDI_idx3, plusDI_idx4)
+    idxMinusDIs = array.from(minusDI_idx1, minusDI_idx2, minusDI_idx3, minusDI_idx4)
+    idxStructures = array.from(structure_idx1, structure_idx2, structure_idx3, structure_idx4)
+    idxScores = array.from(score_idx1, score_idx2, score_idx3, score_idx4)
+    idxRanks = array.from(rank_idx1, rank_idx2, rank_idx3, rank_idx4)
+    
+    for i = 0 to 3
+        scoreVal = array.get(idxScores, i)
+        
+        if scoreVal != -999
+            row = i + 16
+            instName = getShortName(array.get(idxInstruments, i))
+            atrVal = array.get(idxAtrs, i)
+            atrPerc = array.get(idxAtrPercs, i)
+            regime = array.get(idxRegimes, i)
+            volVal = array.get(idxVols, i)
+            volMAVal = array.get(idxVolMAs, i)
+            volRatio = array.get(idxVolRatios, i)
+            adxVal = array.get(idxAdxs, i)
+            plusDIVal = array.get(idxPlusDIs, i)
+            minusDIVal = array.get(idxMinusDIs, i)
+            structVal = array.get(idxStructures, i)
+            rankVal = array.get(idxRanks, i)
+            
+            regimeColor = getRegimeColor(regime)
+            regimeBgColor = getRegimeBgColor(regime)
+            volColor = volRatio > 120 ? color.new(color.green, 0) : volRatio < 80 ? color.new(color.orange, 0) : color.new(#B0B0B0, 0)
+            structColor = structVal == "TRENDING UP" ? color.new(color.green, 0) : structVal == "TRENDING DOWN" ? color.new(color.red, 0) : structVal == "RANGING" ? color.new(color.gray, 0) : color.new(color.yellow, 0)
+            
+            rowBg = getRowBgColor(rankVal, scoreVal, highlightTop5)
+            rankColor = isTop5(rankVal, scoreVal) ? color.new(color.yellow, 0) : color.new(#B0B0B0, 0)
+            scoreColor = scoreVal >= 6 ? color.new(color.green, 0) : scoreVal >= 3 ? color.new(color.yellow, 0) : color.new(#B0B0B0, 0)
+            
+            table.cell(tradeTable, 0, row, str.tostring(rankVal), text_color=rankColor, bgcolor=rowBg, text_size=txtSize)
+            table.cell(tradeTable, 1, row, str.tostring(scoreVal), text_color=scoreColor, bgcolor=rowBg, text_size=txtSize)
+            table.cell(tradeTable, 2, row, instName, text_color=color.new(#C0C0C0, 0), bgcolor=rowBg, text_size=txtSize)
+            table.cell(tradeTable, 3, row, str.tostring(atrPerc, "#") + "%", text_color=color.new(#B0B0B0, 0), bgcolor=rowBg, text_size=txtSize)
+            table.cell(tradeTable, 4, row, regime, text_color=regimeColor, bgcolor=regimeBgColor, text_size=txtSize)
+            table.cell(tradeTable, 5, row, str.tostring(volVal, format.volume), text_color=color.new(#B0B0B0, 0), bgcolor=rowBg, text_size=txtSize)
+            table.cell(tradeTable, 6, row, str.tostring(volMAVal, format.volume), text_color=color.new(#B0B0B0, 0), bgcolor=rowBg, text_size=txtSize)
+            table.cell(tradeTable, 7, row, str.tostring(volRatio, "#") + "%", text_color=volColor, bgcolor=rowBg, text_size=txtSize)
+            table.cell(tradeTable, 8, row, str.tostring(adxVal, "#.#"), text_color=color.new(#B0B0B0, 0), bgcolor=rowBg, text_size=txtSize)
+            table.cell(tradeTable, 9, row, str.tostring(plusDIVal, "#.#"), text_color=color.new(color.green, 0), bgcolor=rowBg, text_size=txtSize)
+            table.cell(tradeTable, 10, row, str.tostring(minusDIVal, "#.#"), text_color=color.new(color.red, 0), bgcolor=rowBg, text_size=txtSize)
+            table.cell(tradeTable, 11, row, structVal, text_color=structColor, bgcolor=rowBg, text_size=txtSize)
+            table.cell(tradeTable, 12, row, str.tostring(atrVal, "#.####"), text_color=color.new(#B0B0B0, 0), bgcolor=rowBg, text_size=txtSize)
+    
+// ============================================================================
+// RIGHT TABLE - SENTIMENT (ENHANCED for v2.2)
+// ============================================================================
+
+var table sentimentTable = table.new(position.middle_right, 3, 20, border_width=1, border_color=color.new(#3A3A3A, 0), frame_color=color.new(#3A3A3A, 0), frame_width=1)
+
+if barstate.islast
+    txtSize = tableSize == "auto" ? size.auto : tableSize == "tiny" ? size.tiny : tableSize == "small" ? size.small : tableSize == "normal" ? size.normal : tableSize == "large" ? size.large : size.huge
+    
+    // Colors for signals
+    vixColor = vixSignal == "NORMAL" ? color.new(color.green, 0) : vixSignal == "RISK-OFF" ? color.new(color.red, 0) : color.new(color.yellow, 0)
+    vixBgColor = vixSignal == "NORMAL" ? color.new(color.green, 85) : vixSignal == "RISK-OFF" ? color.new(color.red, 85) : color.new(color.yellow, 85)
+    dxyColor = dxySignal == "STRONG $" ? color.new(color.orange, 0) : color.new(color.blue, 0)
+    dxyBgColor = dxySignal == "STRONG $" ? color.new(color.orange, 85) : color.new(color.blue, 85)
+    spxColor = spxSignal == "RISK-ON" ? color.new(color.green, 0) : color.new(color.red, 0)
+    spxBgColor = spxSignal == "RISK-ON" ? color.new(color.green, 85) : color.new(color.red, 85)
+    
+    int currentRow = 0
+    
+    // HEADER
+    table.cell(sentimentTable, 0, currentRow, "MARKET SENTIMENT", text_color=color.new(color.white, 0), bgcolor=color.new(#1E3A5F, 0), text_size=txtSize, text_halign=text.align_center)
+    table.merge_cells(sentimentTable, 0, currentRow, 2, currentRow)
+    currentRow += 1
+    
+    // === INTERMARKET CONTEXT ===
+    table.cell(sentimentTable, 0, currentRow, "🌍 INTERMARKET", text_color=color.new(color.yellow, 0), bgcolor=color.new(#2A2A2A, 0), text_size=txtSize)
+    table.merge_cells(sentimentTable, 0, currentRow, 2, currentRow)
+    currentRow += 1
+    
+    // VIX
+    table.cell(sentimentTable, 0, currentRow, "VIX", text_color=color.new(#C0C0C0, 0), bgcolor=color.new(#1A1A1A, 0), text_size=txtSize)
+    table.cell(sentimentTable, 1, currentRow, str.tostring(vixClose, "#.##"), text_color=color.new(#B0B0B0, 0), bgcolor=color.new(#1A1A1A, 0), text_size=txtSize)
+    table.cell(sentimentTable, 2, currentRow, vixSignal, text_color=vixColor, bgcolor=vixBgColor, text_size=txtSize)
+    currentRow += 1
+    
+    // DXY
+    table.cell(sentimentTable, 0, currentRow, "DXY", text_color=color.new(#C0C0C0, 0), bgcolor=color.new(#1A1A1A, 0), text_size=txtSize)
+    table.cell(sentimentTable, 1, currentRow, str.tostring(dxyClose, "#.##"), text_color=color.new(#B0B0B0, 0), bgcolor=color.new(#1A1A1A, 0), text_size=txtSize)
+    table.cell(sentimentTable, 2, currentRow, dxySignal, text_color=dxyColor, bgcolor=dxyBgColor, text_size=txtSize)
+    currentRow += 1
+    
+    // S&P 500
+    table.cell(sentimentTable, 0, currentRow, "S&P 500", text_color=color.new(#C0C0C0, 0), bgcolor=color.new(#1A1A1A, 0), text_size=txtSize)
+    table.cell(sentimentTable, 1, currentRow, str.tostring(spxClose, "#"), text_color=color.new(#B0B0B0, 0), bgcolor=color.new(#1A1A1A, 0), text_size=txtSize)
+    table.cell(sentimentTable, 2, currentRow, spxSignal, text_color=spxColor, bgcolor=spxBgColor, text_size=txtSize)
+    currentRow += 1
+    
+    // Environment Summary
+    envColor = marketEnv == "RISK-ON" ? color.new(color.green, 0) : marketEnv == "RISK-OFF" ? color.new(color.red, 0) : color.new(color.yellow, 0)
+    envBgColor = marketEnv == "RISK-ON" ? color.new(color.green, 85) : marketEnv == "RISK-OFF" ? color.new(color.red, 85) : color.new(color.yellow, 85)
+    table.cell(sentimentTable, 0, currentRow, "Environment", text_color=color.new(#C0C0C0, 0), bgcolor=color.new(#1A1A1A, 0), text_size=txtSize)
+    table.cell(sentimentTable, 1, currentRow, "", bgcolor=color.new(#1A1A1A, 0))
+    table.cell(sentimentTable, 2, currentRow, marketEnv, text_color=envColor, bgcolor=envBgColor, text_size=txtSize)
+    currentRow += 1
+    
+    // Separator
+    table.cell(sentimentTable, 0, currentRow, "", bgcolor=color.new(#2A2A2A, 0))
+    table.merge_cells(sentimentTable, 0, currentRow, 2, currentRow)
+    currentRow += 1
+    
+    // === TRADING FOCUS ===
+    table.cell(sentimentTable, 0, currentRow, "🎯 TRADING FOCUS", text_color=color.new(color.aqua, 0), bgcolor=color.new(#2A2A2A, 0), text_size=txtSize)
+    table.merge_cells(sentimentTable, 0, currentRow, 2, currentRow)
+    currentRow += 1
+    
+    // Top 1
+    table.cell(sentimentTable, 0, currentRow, "#1 " + top1Name, text_color=color.new(color.yellow, 0), bgcolor=color.new(#1A1A1A, 0), text_size=txtSize)
+    table.cell(sentimentTable, 1, currentRow, top1Bias, text_color=top1Bias == "LONG" ? color.green : top1Bias == "SHORT" ? color.red : color.gray, bgcolor=color.new(#1A1A1A, 0), text_size=txtSize)
+    table.cell(sentimentTable, 2, currentRow, str.tostring(top1Change, "+#.##%"), text_color=top1Change >= 0 ? color.green : color.red, bgcolor=color.new(#1A1A1A, 0), text_size=txtSize)
+    currentRow += 1
+    
+    // Top 2
+    table.cell(sentimentTable, 0, currentRow, "#2 " + top2Name, text_color=color.new(#C0C0C0, 0), bgcolor=color.new(#1A1A1A, 0), text_size=txtSize)
+    table.cell(sentimentTable, 1, currentRow, top2Bias, text_color=top2Bias == "LONG" ? color.green : top2Bias == "SHORT" ? color.red : color.gray, bgcolor=color.new(#1A1A1A, 0), text_size=txtSize)
+    table.cell(sentimentTable, 2, currentRow, str.tostring(top2Change, "+#.##%"), text_color=top2Change >= 0 ? color.green : color.red, bgcolor=color.new(#1A1A1A, 0), text_size=txtSize)
+    currentRow += 1
+    
+    // Top 3
+    table.cell(sentimentTable, 0, currentRow, "#3 " + top3Name, text_color=color.new(#C0C0C0, 0), bgcolor=color.new(#1A1A1A, 0), text_size=txtSize)
+    table.cell(sentimentTable, 1, currentRow, top3Bias, text_color=top3Bias == "LONG" ? color.green : top3Bias == "SHORT" ? color.red : color.gray, bgcolor=color.new(#1A1A1A, 0), text_size=txtSize)
+    table.cell(sentimentTable, 2, currentRow, str.tostring(top3Change, "+#.##%"), text_color=top3Change >= 0 ? color.green : color.red, bgcolor=color.new(#1A1A1A, 0), text_size=txtSize)
+    currentRow += 1
+    
+    // Separator
+    table.cell(sentimentTable, 0, currentRow, "", bgcolor=color.new(#2A2A2A, 0))
+    table.merge_cells(sentimentTable, 0, currentRow, 2, currentRow)
+    currentRow += 1
+    
+    // === SESSION TIMING ===
+    table.cell(sentimentTable, 0, currentRow, "⏰ SESSION", text_color=color.new(color.orange, 0), bgcolor=color.new(#2A2A2A, 0), text_size=txtSize)
+    table.merge_cells(sentimentTable, 0, currentRow, 2, currentRow)
+    currentRow += 1
+    
+    // Current Session
+    sessionColor = sessionStrength == "PRIME" ? color.new(color.green, 0) : sessionStrength == "ACCEPTABLE" ? color.new(color.yellow, 0) : color.new(color.red, 0)
+    table.cell(sentimentTable, 0, currentRow, "Current", text_color=color.new(#C0C0C0, 0), bgcolor=color.new(#1A1A1A, 0), text_size=txtSize)
+    table.cell(sentimentTable, 1, currentRow, currentSession, text_color=color.new(#B0B0B0, 0), bgcolor=color.new(#1A1A1A, 0), text_size=txtSize)
+    table.cell(sentimentTable, 2, currentRow, sessionStrength, text_color=sessionColor, bgcolor=color.new(#1A1A1A, 0), text_size=txtSize)
+    currentRow += 1
+    
+    // Separator
+    table.cell(sentimentTable, 0, currentRow, "", bgcolor=color.new(#2A2A2A, 0))
+    table.merge_cells(sentimentTable, 0, currentRow, 2, currentRow)
+    currentRow += 1
+    
+    // Footer
+    table.cell(sentimentTable, 0, currentRow, "Framework v1.8 Compliant", text_color=color.new(#4CAF50, 0), bgcolor=color.new(#1A1A2A, 0), text_size=txtSize, text_halign=text.align_center)
+    table.merge_cells(sentimentTable, 0, currentRow, 2, currentRow)
