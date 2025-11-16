@@ -1,0 +1,115 @@
+// FRAMEWORK 2.0 - STAGE 5: TRIGGER - VOLUME RATIO v5.1 (CTA OPTIMIZED)
+// OPTIMIZED FOR SCREENSHOT VISIBILITY
+//@version=6
+indicator("📊 TRIGGER VOLUME", overlay=false, max_bars_back=500, format=format.volume)
+
+// ═══════════════════════════════════════════════════════════════
+// INPUTS
+// ═══════════════════════════════════════════════════════════════
+
+// Volume Analysis
+volLength = input.int(50, "Volume SMA Length", minval=10, maxval=200, step=10, group="📈 Volume Analysis")
+minVolMultiplier = input.float(1.2, "Min Volume Multiplier", minval=1.0, maxval=3.0, step=0.1, group="📈 Volume Analysis")
+
+// Quality Tiers
+tier1Threshold = input.float(1.5, "STRONG (Tier 1)", minval=1.2, maxval=3.0, step=0.1, group="🎯 Quality Tiers")
+tier2Threshold = input.float(1.2, "ACCEPTABLE (Tier 2)", minval=1.0, maxval=2.0, step=0.1, group="🎯 Quality Tiers")
+
+// Display
+tableLoc = input.string("bottom_right", "Table Position", options=["top_right", "top_left", "bottom_right", "bottom_left"], group="🎨 Display")
+showHistogram = input.bool(true, "Show Volume Histogram", group="🎨 Display")
+
+// ═══════════════════════════════════════════════════════════════
+// VOLUME CALCULATIONS
+// ═══════════════════════════════════════════════════════════════
+
+volSMA = ta.sma(volume, volLength)
+volRatio = volSMA > 0 ? volume / volSMA : 0
+
+// ═══════════════════════════════════════════════════════════════
+// QUALITY TIER CLASSIFICATION
+// ═══════════════════════════════════════════════════════════════
+
+isStrong = volRatio >= tier1Threshold
+isAcceptable = volRatio >= tier2Threshold and volRatio < tier1Threshold
+isWeak = volRatio < tier2Threshold
+
+qualityTier = isStrong ? "STRONG" : isAcceptable ? "OK" : "WEAK"
+tierColor = isStrong ? color.new(color.green, 0) : isAcceptable ? color.new(color.orange, 0) : color.new(color.red, 0)
+
+// Position Size Recommendation
+positionSize = isStrong ? 100 : isAcceptable ? 75 : 50
+
+// ═══════════════════════════════════════════════════════════════
+// VOLUME HISTOGRAM - OPTIMIZED COLORS
+// ═══════════════════════════════════════════════════════════════
+
+histColor = isStrong ? color.new(color.green, 0) : isAcceptable ? color.new(color.yellow, 0) : color.new(color.red, 0)
+
+// Histogram with clean display (no value plots)
+// Histogram with clean display
+plot(showHistogram ? volRatio : na, "Volume Ratio", histColor, 3, plot.style_histogram, display=display.all)
+hline(tier1Threshold, "Strong", color.new(color.green, 50), hline.style_dashed, 2)
+hline(tier2Threshold, "Min", color.new(color.orange, 50), hline.style_dashed, 2)
+
+// ═══════════════════════════════════════════════════════════════
+// STATUS TABLE - HIGHLY VISIBLE
+// ═══════════════════════════════════════════════════════════════
+
+var table volTable = table.new(position=tableLoc == "top_right" ? position.top_right : tableLoc == "top_left" ? position.top_left : tableLoc == "bottom_right" ? position.bottom_right : position.bottom_left, columns=2, rows=5, bgcolor=color.new(color.black, 10), border_width=3, border_color=color.new(color.gray, 30))
+
+if barstate.islast
+    // Header - Clean and prominent
+    table.cell(volTable, 0, 0, "VOL", text_color=color.white, bgcolor=color.new(color.gray, 70), text_size=size.small, text_halign=text.align_center)
+    
+    table.cell(volTable, 1, 0, qualityTier, text_color=color.white, bgcolor=tierColor, text_size=size.large, text_halign=text.align_center)
+    
+    // Current Ratio
+    table.cell(volTable, 0, 1, "Ratio:", text_color=color.gray, text_size=size.small)
+    
+    ratioText = str.tostring(volRatio, "#.##") + "x"
+    table.cell(volTable, 1, 1, ratioText, text_color=tierColor, text_size=size.small, text_halign=text.align_right)
+    
+    // Current Volume
+    table.cell(volTable, 0, 2, "Current:", text_color=color.gray, text_size=size.small)
+    
+    table.cell(volTable, 1, 2, str.tostring(volume, "#"), text_color=color.white, text_size=size.small, text_halign=text.align_right)
+    
+    // Average Volume
+    table.cell(volTable, 0, 3, "Avg (" + str.tostring(volLength) + "):", text_color=color.gray, text_size=size.small)
+    
+    table.cell(volTable, 1, 3, str.tostring(volSMA, "#"), text_color=color.white, text_size=size.small, text_halign=text.align_right)
+    
+    // Position Size Recommendation
+    table.cell(volTable, 0, 4, "Size:", text_color=color.gray, text_size=size.small)
+    
+    sizeText = str.tostring(positionSize) + " EUR"
+    table.cell(volTable, 1, 4, sizeText, text_color=tierColor, text_size=size.small, text_halign=text.align_right)
+
+// ═══════════════════════════════════════════════════════════════
+// BACKGROUND COLORING (Optional visual aid)
+// ═══════════════════════════════════════════════════════════════
+
+bgcolor(isStrong ? color.new(color.green, 95) : isAcceptable ? color.new(color.yellow, 95) : color.new(color.red, 95), title="Quality Background")
+
+// ═══════════════════════════════════════════════════════════════
+// ALERTS
+// ═══════════════════════════════════════════════════════════════
+
+if ta.crossover(volRatio, tier1Threshold)
+    alert("🔥 STRONG Volume Spike: " + str.tostring(volRatio, "#.##") + "x", alert.freq_once_per_bar)
+
+if ta.crossover(volRatio, tier2Threshold)
+    alert("✓ Acceptable Volume: " + str.tostring(volRatio, "#.##") + "x", alert.freq_once_per_bar)
+
+if ta.crossunder(volRatio, tier2Threshold)
+    alert("⚠️ Weak Volume: " + str.tostring(volRatio, "#.##") + "x", alert.freq_once_per_bar)
+
+// ═══════════════════════════════════════════════════════════════
+// VISUAL STATUS INDICATOR (Top-right corner)
+// ═══════════════════════════════════════════════════════════════
+
+// Plot large emoji/symbol for quick visual reference
+plotshape(barstate.islast and isStrong, "Strong Vol", shape.circle, location.top, color.new(color.green, 0), size=size.large)
+plotshape(barstate.islast and isAcceptable, "OK Vol", shape.circle, location.top, color.new(color.yellow, 0), size=size.normal)
+plotshape(barstate.islast and isWeak, "Weak Vol", shape.xcross, location.top, color.new(color.red, 0), size=size.small)

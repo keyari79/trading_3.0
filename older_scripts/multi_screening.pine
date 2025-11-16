@@ -1,0 +1,310 @@
+//@version=6
+indicator("Stage 2: SCREENING - Multi-Instrument Screener (CTA-Ready)", overlay=true, max_bars_back=200)
+
+// ============================================================================
+// CTA OPTIMIZATION: Added RANK and SCORE columns so CTA can see:
+// 1. Which instrument ranks 1st, 2nd, 3rd, 4th, 5th
+// 2. WHY each instrument ranked where it did (transparent scoring)
+// 3. Clear FOCUS guidance: "WATCH" vs "SKIP" instead of cryptic "*"
+// ============================================================================
+
+// ============================================================================
+// INPUTS
+// ============================================================================
+
+// Instrument Selection
+string sym1 = input.symbol("FX:EURUSD", "Instrument 1", group="Instruments")
+string sym2 = input.symbol("FX:USDJPY", "Instrument 2", group="Instruments")
+string sym3 = input.symbol("OANDA:XAUUSD", "Instrument 3 (Gold)", group="Instruments")
+string sym4 = input.symbol("OANDA:XAGUSD", "Instrument 4 (Silver)", group="Instruments")
+string sym5 = input.symbol("TVC:USOIL", "Instrument 5 (Oil)", group="Instruments")
+
+// Display Settings
+string tablePos = input.string("top_right", "Table Position", options=["top_left", "top_center", "top_right", "middle_left", "middle_center", "middle_right", "bottom_left", "bottom_center", "bottom_right"], group="Display")
+string tableSize = input.string("small", "Text Size", options=["auto", "tiny", "small", "normal", "large", "huge"], group="Display")
+
+// ATR Settings
+int atrPeriod = input.int(14, "ATR Period", minval=1, group="Volatility Regime")
+int atrLookback = input.int(100, "ATR Lookback Period", minval=50, maxval=500, group="Volatility Regime")
+
+// Session Settings (UTC times)
+int asiaStart = input.int(0, "Asia Session Start (UTC)", minval=0, maxval=23, group="Sessions")
+int asiaEnd = input.int(7, "Asia Session End (UTC)", minval=0, maxval=23, group="Sessions")
+int europeStart = input.int(7, "Europe Session Start (UTC)", minval=0, maxval=23, group="Sessions")
+int europeEnd = input.int(16, "Europe Session End (UTC)", minval=0, maxval=23, group="Sessions")
+int usStart = input.int(13, "US Session Start (UTC)", minval=0, maxval=23, group="Sessions")
+int usEnd = input.int(20, "US Session End (UTC)", minval=0, maxval=23, group="Sessions")
+
+// ============================================================================
+// HELPER FUNCTIONS
+// ============================================================================
+
+// Get volatility regime classification
+getVolatilityRegime(float atrValue, float atrP20, float atrP80) =>
+    regime = atrValue < atrP20 ? "L" : atrValue > atrP80 ? "H" : "N"
+    color regimeColor = regime == "L" ? color.new(#FFD700, 0) : regime == "H" ? color.new(#FF4444, 0) : color.new(#00FF00, 0)
+    // Score: Normal=10 (best), High=7 (caution), Low=4 (skip marginal)
+    int score = regime == "N" ? 10 : regime == "H" ? 7 : 4
+    [regime, regimeColor, score]
+
+// Get session alignment for instrument
+getSessionAlignment(string symbol) =>
+    alignment = "EUR"
+    if str.contains(symbol, "JPY")
+        alignment := "ASIA-EUR"
+    else if str.contains(symbol, "USD")
+        alignment := "EUR-US"
+    else if str.contains(symbol, "XAU") or str.contains(symbol, "GOLD")
+        alignment := "EUR-US"
+    else if str.contains(symbol, "XAG") or str.contains(symbol, "SILVER")
+        alignment := "EUR-US"
+    else if str.contains(symbol, "OIL") or str.contains(symbol, "CL")
+        alignment := "US"
+    alignment
+
+// Check if current time is in optimal session
+isOptimalSession(string alignment) =>
+    hour_utc = hour(time, "UTC")
+    inAsia = hour_utc >= asiaStart and hour_utc < asiaEnd
+    inEurope = hour_utc >= europeStart and hour_utc < europeEnd
+    inUS = hour_utc >= usStart and hour_utc < usEnd
+    optimal = false
+    if alignment == "ASIA-EUR"
+        optimal := inAsia or inEurope
+    else if alignment == "EUR-US"
+        optimal := inEurope or inUS
+    else if alignment == "US"
+        optimal := inUS
+    else if alignment == "EUR"
+        optimal := inEurope
+    // Score: In optimal session=10, outside=3
+    int score = optimal ? 10 : 3
+    [optimal, score]
+
+// Calculate 24H % change
+get24HChange(string symbol) =>
+    [dailyClose, dailyHigh, dailyLow, dailyOpen] = request.security(symbol, "D", [close[1], high[1], low[1], open[1]], lookahead=barmerge.lookahead_on)
+    currentPrice = request.security(symbol, timeframe.period, close, lookahead=barmerge.lookahead_off)
+    change = dailyClose != 0 ? ((currentPrice - dailyClose) / dailyClose) * 100 : 0.0
+    change
+
+// Get ATR regime for symbol
+getATRRegime(string symbol) =>
+    [atr, atrP20, atrP80] = request.security(symbol, "D", [ta.atr(atrPeriod), ta.percentile_nearest_rank(ta.atr(atrPeriod), atrLookback, 20), ta.percentile_nearest_rank(ta.atr(atrPeriod), atrLookback, 80)], lookahead=barmerge.lookahead_on)
+    [regime, regimeColor, score] = getVolatilityRegime(atr, atrP20, atrP80)
+    [regime, regimeColor, score]
+
+// ============================================================================
+// INSTRUMENT ANALYSIS WITH SCORING
+// ============================================================================
+
+// Get data for all 5 instruments
+change1 = get24HChange(sym1)
+change2 = get24HChange(sym2)
+change3 = get24HChange(sym3)
+change4 = get24HChange(sym4)
+change5 = get24HChange(sym5)
+
+[regime1, color1, regScore1] = getATRRegime(sym1)
+[regime2, color2, regScore2] = getATRRegime(sym2)
+[regime3, color3, regScore3] = getATRRegime(sym3)
+[regime4, color4, regScore4] = getATRRegime(sym4)
+[regime5, color5, regScore5] = getATRRegime(sym5)
+
+session1 = getSessionAlignment(sym1)
+session2 = getSessionAlignment(sym2)
+session3 = getSessionAlignment(sym3)
+session4 = getSessionAlignment(sym4)
+session5 = getSessionAlignment(sym5)
+
+[optimal1, sessScore1] = isOptimalSession(session1)
+[optimal2, sessScore2] = isOptimalSession(session2)
+[optimal3, sessScore3] = isOptimalSession(session3)
+[optimal4, sessScore4] = isOptimalSession(session4)
+[optimal5, sessScore5] = isOptimalSession(session5)
+
+// ============================================================================
+// COMPOSITE SCORING & RANKING
+// ============================================================================
+
+// Calculate momentum score (based on 24H % change)
+// Higher absolute change = higher score (max 10 points)
+momentumScore1 = math.min(math.abs(change1) * 2, 10)
+momentumScore2 = math.min(math.abs(change2) * 2, 10)
+momentumScore3 = math.min(math.abs(change3) * 2, 10)
+momentumScore4 = math.min(math.abs(change4) * 2, 10)
+momentumScore5 = math.min(math.abs(change5) * 2, 10)
+
+// COMPOSITE SCORE = Regime (40%) + Session (30%) + Momentum (30%)
+// This is transparent and CTA can verify the logic
+score1 = (regScore1 * 0.4) + (sessScore1 * 0.3) + (momentumScore1 * 0.3)
+score2 = (regScore2 * 0.4) + (sessScore2 * 0.3) + (momentumScore2 * 0.3)
+score3 = (regScore3 * 0.4) + (sessScore3 * 0.3) + (momentumScore3 * 0.3)
+score4 = (regScore4 * 0.4) + (sessScore4 * 0.3) + (momentumScore4 * 0.3)
+score5 = (regScore5 * 0.4) + (sessScore5 * 0.3) + (momentumScore5 * 0.3)
+
+// Calculate RANK (1=best, 5=worst)
+// Compare each score against all others
+rank1 = 1
+rank1 := score2 > score1 ? rank1 + 1 : rank1
+rank1 := score3 > score1 ? rank1 + 1 : rank1
+rank1 := score4 > score1 ? rank1 + 1 : rank1
+rank1 := score5 > score1 ? rank1 + 1 : rank1
+
+rank2 = 1
+rank2 := score1 > score2 ? rank2 + 1 : rank2
+rank2 := score3 > score2 ? rank2 + 1 : rank2
+rank2 := score4 > score2 ? rank2 + 1 : rank2
+rank2 := score5 > score2 ? rank2 + 1 : rank2
+
+rank3 = 1
+rank3 := score1 > score3 ? rank3 + 1 : rank3
+rank3 := score2 > score3 ? rank3 + 1 : rank3
+rank3 := score4 > score3 ? rank3 + 1 : rank3
+rank3 := score5 > score3 ? rank3 + 1 : rank3
+
+rank4 = 1
+rank4 := score1 > score4 ? rank4 + 1 : rank4
+rank4 := score2 > score4 ? rank4 + 1 : rank4
+rank4 := score3 > score4 ? rank4 + 1 : rank4
+rank4 := score5 > score4 ? rank4 + 1 : rank4
+
+rank5 = 1
+rank5 := score1 > score5 ? rank5 + 1 : rank5
+rank5 := score2 > score5 ? rank5 + 1 : rank5
+rank5 := score3 > score5 ? rank5 + 1 : rank5
+rank5 := score4 > score5 ? rank5 + 1 : rank5
+
+// Determine FOCUS status (CTA-friendly: explicit text)
+// WATCH = Rank 1 or 2 (top priorities)
+// SKIP = Rank 3-5
+focus1 = rank1 <= 2 ? "WATCH" : "SKIP"
+focus2 = rank2 <= 2 ? "WATCH" : "SKIP"
+focus3 = rank3 <= 2 ? "WATCH" : "SKIP"
+focus4 = rank4 <= 2 ? "WATCH" : "SKIP"
+focus5 = rank5 <= 2 ? "WATCH" : "SKIP"
+
+// Focus color: Green for WATCH, Red for SKIP
+focusColor1 = rank1 <= 2 ? color.new(#00FF88, 70) : color.new(#666666, 70)
+focusColor2 = rank2 <= 2 ? color.new(#00FF88, 70) : color.new(#666666, 70)
+focusColor3 = rank3 <= 2 ? color.new(#00FF88, 70) : color.new(#666666, 70)
+focusColor4 = rank4 <= 2 ? color.new(#00FF88, 70) : color.new(#666666, 70)
+focusColor5 = rank5 <= 2 ? color.new(#00FF88, 70) : color.new(#666666, 70)
+
+// Rank color: Green for top 2, yellow for 3rd, gray for 4-5
+rankColor1 = rank1 <= 2 ? color.new(#00FF88, 50) : rank1 == 3 ? color.new(#FFD700, 50) : color.new(#666666, 70)
+rankColor2 = rank2 <= 2 ? color.new(#00FF88, 50) : rank2 == 3 ? color.new(#FFD700, 50) : color.new(#666666, 70)
+rankColor3 = rank3 <= 2 ? color.new(#00FF88, 50) : rank3 == 3 ? color.new(#FFD700, 50) : color.new(#666666, 70)
+rankColor4 = rank4 <= 2 ? color.new(#00FF88, 50) : rank4 == 3 ? color.new(#FFD700, 50) : color.new(#666666, 70)
+rankColor5 = rank5 <= 2 ? color.new(#00FF88, 50) : rank5 == 3 ? color.new(#FFD700, 50) : color.new(#666666, 70)
+
+// ============================================================================
+// TABLE DISPLAY
+// ============================================================================
+
+// Create screening table with 8 columns (added RANK and SCORE)
+var table screenTable = table.new(position=tablePos == "top_left" ? position.top_left : tablePos == "top_center" ? position.top_center : tablePos == "top_right" ? position.top_right : tablePos == "middle_left" ? position.middle_left : tablePos == "middle_center" ? position.middle_center : tablePos == "middle_right" ? position.middle_right : tablePos == "bottom_left" ? position.bottom_left : tablePos == "bottom_center" ? position.bottom_center : position.bottom_right, columns=8, rows=7, border_width=1, border_color=color.new(#3A3A3A, 0), frame_color=color.new(#3A3A3A, 0), frame_width=1)
+
+if barstate.islast
+    txtSize = tableSize == "auto" ? size.auto : tableSize == "tiny" ? size.tiny : tableSize == "small" ? size.small : tableSize == "normal" ? size.normal : tableSize == "large" ? size.large : size.huge
+    
+    // Header
+    table.cell(screenTable, 0, 0, "MULTI-INSTRUMENT SCREENER", text_color=color.new(color.white, 0), bgcolor=color.new(#1E4D8B, 0), text_size=txtSize)
+    table.merge_cells(screenTable, 0, 0, 7, 0)
+    
+    // Column headers
+    table.cell(screenTable, 0, 1, "Rank", text_color=color.new(#CCCCCC, 0), bgcolor=color.new(#2A2A2A, 0), text_size=txtSize)
+    table.cell(screenTable, 1, 1, "Instrument", text_color=color.new(#CCCCCC, 0), bgcolor=color.new(#2A2A2A, 0), text_size=txtSize)
+    table.cell(screenTable, 2, 1, "24H %", text_color=color.new(#CCCCCC, 0), bgcolor=color.new(#2A2A2A, 0), text_size=txtSize)
+    table.cell(screenTable, 3, 1, "Regime", text_color=color.new(#CCCCCC, 0), bgcolor=color.new(#2A2A2A, 0), text_size=txtSize)
+    table.cell(screenTable, 4, 1, "Session", text_color=color.new(#CCCCCC, 0), bgcolor=color.new(#2A2A2A, 0), text_size=txtSize)
+    table.cell(screenTable, 5, 1, "Optimal", text_color=color.new(#CCCCCC, 0), bgcolor=color.new(#2A2A2A, 0), text_size=txtSize)
+    table.cell(screenTable, 6, 1, "Score", text_color=color.new(#CCCCCC, 0), bgcolor=color.new(#2A2A2A, 0), text_size=txtSize)
+    table.cell(screenTable, 7, 1, "Focus", text_color=color.new(#CCCCCC, 0), bgcolor=color.new(#2A2A2A, 0), text_size=txtSize)
+    
+    // Extract short names
+    var string name1 = na
+    var string name2 = na
+    var string name3 = na
+    var string name4 = na
+    var string name5 = na
+    
+    if str.contains(sym1, ":")
+        parts1 = str.split(sym1, ":")
+        name1 := array.get(parts1, 1)
+    else
+        name1 := sym1
+        
+    if str.contains(sym2, ":")
+        parts2 = str.split(sym2, ":")
+        name2 := array.get(parts2, 1)
+    else
+        name2 := sym2
+        
+    if str.contains(sym3, ":")
+        parts3 = str.split(sym3, ":")
+        name3 := array.get(parts3, 1)
+    else
+        name3 := sym3
+        
+    if str.contains(sym4, ":")
+        parts4 = str.split(sym4, ":")
+        name4 := array.get(parts4, 1)
+    else
+        name4 := sym4
+        
+    if str.contains(sym5, ":")
+        parts5 = str.split(sym5, ":")
+        name5 := array.get(parts5, 1)
+    else
+        name5 := sym5
+    
+    // Instrument 1 row
+    table.cell(screenTable, 0, 2, str.tostring(rank1), text_color=color.new(#FFFFFF, 0), bgcolor=rankColor1, text_size=txtSize)
+    table.cell(screenTable, 1, 2, name1, text_color=color.new(#E0E0E0, 0), bgcolor=color.new(#1A1A1A, 0), text_size=txtSize)
+    table.cell(screenTable, 2, 2, str.tostring(change1, "#.##") + "%", text_color=change1 >= 0 ? color.new(#00FF88, 0) : color.new(#FF4444, 0), bgcolor=color.new(#1A1A1A, 0), text_size=txtSize)
+    table.cell(screenTable, 3, 2, regime1, text_color=color.new(#000000, 0), bgcolor=color1, text_size=txtSize)
+    table.cell(screenTable, 4, 2, session1, text_color=color.new(#B0B0B0, 0), bgcolor=color.new(#1A1A1A, 0), text_size=txtSize)
+    table.cell(screenTable, 5, 2, optimal1 ? "✓" : "-", text_color=optimal1 ? color.new(#00FF88, 0) : color.new(#666666, 0), bgcolor=color.new(#1A1A1A, 0), text_size=txtSize)
+    table.cell(screenTable, 6, 2, str.tostring(score1, "#.#"), text_color=color.new(#E0E0E0, 0), bgcolor=color.new(#1A1A1A, 0), text_size=txtSize)
+    table.cell(screenTable, 7, 2, focus1, text_color=color.new(#FFFFFF, 0), bgcolor=focusColor1, text_size=txtSize)
+    
+    // Instrument 2 row
+    table.cell(screenTable, 0, 3, str.tostring(rank2), text_color=color.new(#FFFFFF, 0), bgcolor=rankColor2, text_size=txtSize)
+    table.cell(screenTable, 1, 3, name2, text_color=color.new(#E0E0E0, 0), bgcolor=color.new(#1A1A1A, 0), text_size=txtSize)
+    table.cell(screenTable, 2, 3, str.tostring(change2, "#.##") + "%", text_color=change2 >= 0 ? color.new(#00FF88, 0) : color.new(#FF4444, 0), bgcolor=color.new(#1A1A1A, 0), text_size=txtSize)
+    table.cell(screenTable, 3, 3, regime2, text_color=color.new(#000000, 0), bgcolor=color2, text_size=txtSize)
+    table.cell(screenTable, 4, 3, session2, text_color=color.new(#B0B0B0, 0), bgcolor=color.new(#1A1A1A, 0), text_size=txtSize)
+    table.cell(screenTable, 5, 3, optimal2 ? "✓" : "-", text_color=optimal2 ? color.new(#00FF88, 0) : color.new(#666666, 0), bgcolor=color.new(#1A1A1A, 0), text_size=txtSize)
+    table.cell(screenTable, 6, 3, str.tostring(score2, "#.#"), text_color=color.new(#E0E0E0, 0), bgcolor=color.new(#1A1A1A, 0), text_size=txtSize)
+    table.cell(screenTable, 7, 3, focus2, text_color=color.new(#FFFFFF, 0), bgcolor=focusColor2, text_size=txtSize)
+    
+    // Instrument 3 row
+    table.cell(screenTable, 0, 4, str.tostring(rank3), text_color=color.new(#FFFFFF, 0), bgcolor=rankColor3, text_size=txtSize)
+    table.cell(screenTable, 1, 4, name3, text_color=color.new(#E0E0E0, 0), bgcolor=color.new(#1A1A1A, 0), text_size=txtSize)
+    table.cell(screenTable, 2, 4, str.tostring(change3, "#.##") + "%", text_color=change3 >= 0 ? color.new(#00FF88, 0) : color.new(#FF4444, 0), bgcolor=color.new(#1A1A1A, 0), text_size=txtSize)
+    table.cell(screenTable, 3, 4, regime3, text_color=color.new(#000000, 0), bgcolor=color3, text_size=txtSize)
+    table.cell(screenTable, 4, 4, session3, text_color=color.new(#B0B0B0, 0), bgcolor=color.new(#1A1A1A, 0), text_size=txtSize)
+    table.cell(screenTable, 5, 4, optimal3 ? "✓" : "-", text_color=optimal3 ? color.new(#00FF88, 0) : color.new(#666666, 0), bgcolor=color.new(#1A1A1A, 0), text_size=txtSize)
+    table.cell(screenTable, 6, 4, str.tostring(score3, "#.#"), text_color=color.new(#E0E0E0, 0), bgcolor=color.new(#1A1A1A, 0), text_size=txtSize)
+    table.cell(screenTable, 7, 4, focus3, text_color=color.new(#FFFFFF, 0), bgcolor=focusColor3, text_size=txtSize)
+    
+    // Instrument 4 row
+    table.cell(screenTable, 0, 5, str.tostring(rank4), text_color=color.new(#FFFFFF, 0), bgcolor=rankColor4, text_size=txtSize)
+    table.cell(screenTable, 1, 5, name4, text_color=color.new(#E0E0E0, 0), bgcolor=color.new(#1A1A1A, 0), text_size=txtSize)
+    table.cell(screenTable, 2, 5, str.tostring(change4, "#.##") + "%", text_color=change4 >= 0 ? color.new(#00FF88, 0) : color.new(#FF4444, 0), bgcolor=color.new(#1A1A1A, 0), text_size=txtSize)
+    table.cell(screenTable, 3, 5, regime4, text_color=color.new(#000000, 0), bgcolor=color4, text_size=txtSize)
+    table.cell(screenTable, 4, 5, session4, text_color=color.new(#B0B0B0, 0), bgcolor=color.new(#1A1A1A, 0), text_size=txtSize)
+    table.cell(screenTable, 5, 5, optimal4 ? "✓" : "-", text_color=optimal4 ? color.new(#00FF88, 0) : color.new(#666666, 0), bgcolor=color.new(#1A1A1A, 0), text_size=txtSize)
+    table.cell(screenTable, 6, 5, str.tostring(score4, "#.#"), text_color=color.new(#E0E0E0, 0), bgcolor=color.new(#1A1A1A, 0), text_size=txtSize)
+    table.cell(screenTable, 7, 5, focus4, text_color=color.new(#FFFFFF, 0), bgcolor=focusColor4, text_size=txtSize)
+    
+    // Instrument 5 row
+    table.cell(screenTable, 0, 6, str.tostring(rank5), text_color=color.new(#FFFFFF, 0), bgcolor=rankColor5, text_size=txtSize)
+    table.cell(screenTable, 1, 6, name5, text_color=color.new(#E0E0E0, 0), bgcolor=color.new(#1A1A1A, 0), text_size=txtSize)
+    table.cell(screenTable, 2, 6, str.tostring(change5, "#.##") + "%", text_color=change5 >= 0 ? color.new(#00FF88, 0) : color.new(#FF4444, 0), bgcolor=color.new(#1A1A1A, 0), text_size=txtSize)
+    table.cell(screenTable, 3, 6, regime5, text_color=color.new(#000000, 0), bgcolor=color5, text_size=txtSize)
+    table.cell(screenTable, 4, 6, session5, text_color=color.new(#B0B0B0, 0), bgcolor=color.new(#1A1A1A, 0), text_size=txtSize)
+    table.cell(screenTable, 5, 6, optimal5 ? "✓" : "-", text_color=optimal5 ? color.new(#00FF88, 0) : color.new(#666666, 0), bgcolor=color.new(#1A1A1A, 0), text_size=txtSize)
+    table.cell(screenTable, 6, 6, str.tostring(score5, "#.#"), text_color=color.new(#E0E0E0, 0), bgcolor=color.new(#1A1A1A, 0), text_size=txtSize)
+    table.cell(screenTable, 7, 6, focus5, text_color=color.new(#FFFFFF, 0), bgcolor=focusColor5, text_size=txtSize)

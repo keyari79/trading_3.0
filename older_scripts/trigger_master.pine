@@ -1,0 +1,481 @@
+//@version=6
+indicator("Trigger Master - Auto Detection V2", overlay=true)
+
+// ========================================
+// INPUTS
+// ========================================
+
+// === DETECTION MODE ===
+detectionMode = input.string("Auto", "Detection Mode", options=["Auto", "Manual"], group="Detection Mode", tooltip="Auto = Detect 1H rejection automatically | Manual = Enter signal manually")
+
+// === AUTO DETECTION SETTINGS ===
+autoDirection = input.string("LONG", "Auto: Expected Direction", options=["LONG", "SHORT"], group="Auto Detection", tooltip="Should match SETUP direction")
+autoMinWickBodyRatio = input.float(2.0, "Auto: Min Wick:Body Ratio", minval=1.5, maxval=5.0, group="Auto Detection")
+autoBodyPositionThreshold = input.float(60.0, "Auto: Min Body Position %", minval=50.0, maxval=80.0, group="Auto Detection")
+autoSlowEMAPenMax = input.float(30.0, "Auto: Max Distance from Slow EMA (pips)", group="Auto Detection")
+autoSignalTimeout = input.int(4, "Auto: Signal Timeout (hours)", minval=1, maxval=12, group="Auto Detection", tooltip="Auto-deactivate signal after X hours")
+
+// === MANUAL MODE SETTINGS ===
+manualSignalActive = input.bool(false, "Manual: Signal Active", group="Manual Mode", tooltip="Toggle ON when you detect rejection candle")
+manualSignalLevel = input.float(0.0, "Manual: Signal Level (1H Close)", group="Manual Mode", tooltip="Enter 1H rejection candle close price")
+manualDirection = input.string("LONG", "Manual: Direction", options=["LONG", "SHORT"], group="Manual Mode")
+
+// === ENTRY ZONE ===
+zoneWidth = input.int(10, "Entry Zone Width (pips)", minval=1, maxval=50, group="Entry Zone", tooltip="±pips around signal level")
+pipSize = input.float(0.0001, "Pip Size", options=[0.01, 0.0001, 0.00001], group="Entry Zone", tooltip="0.01=JPY pairs, 0.0001=Major pairs, 0.00001=Exotic pairs")
+
+// === DAILY EMAs ===
+showDailyEMAs = input.bool(true, "Show Daily EMAs", group="Daily EMAs")
+emaFastLength = input.int(7, "Fast EMA Length", group="Daily EMAs")
+emaSlowLength = input.int(21, "Slow EMA Length", group="Daily EMAs")
+
+// === REGIME DETECTION SETTINGS ===
+float regimeGapRatioRanging = input.float(0.3, "Ranging Threshold", minval=0, step=0.05, group="Regime Detection", tooltip="Gap Ratio below this = RANGING")
+float regimeGapRatioWeak = input.float(0.5, "Weak Trend Threshold", minval=0, step=0.05, group="Regime Detection")
+int atrLength = input.int(14, "ATR Length", minval=1, group="Regime Detection")
+float atrPercentileLow = input.float(30.0, "ATR Low Percentile", minval=0, maxval=100, group="Regime Detection")
+float atrPercentileHigh = input.float(70.0, "ATR High Percentile", minval=0, maxval=100, group="Regime Detection")
+float trendThresholdGood = input.float(60.0, "Good Trend Threshold", minval=0, maxval=100, group="Regime Detection")
+float trendThresholdAcceptable = input.float(40.0, "Acceptable Trend", minval=0, maxval=100, group="Regime Detection")
+
+// === TIME QUALITY SETTINGS ===
+bool enableTimeQuality = input.bool(true, "Enable Time Quality Display", group="Time Quality", tooltip="Show current time quality")
+string timezoneSetting = input.string("CET", "Reference Timezone", options=["CET", "UTC"], group="Time Quality")
+
+// === PATTERN DETECTION ===
+enablePatternDetection = input.bool(true, "Enable Pattern Detection", group="Patterns")
+minWickBodyRatio = input.float(2.0, "Min Wick:Body Ratio", minval=1.5, maxval=5.0, group="Patterns")
+minBodyPosition = input.float(60.0, "Min Body Position %", minval=50.0, maxval=80.0, group="Patterns")
+maxBodyPercent = input.float(40.0, "Max Body % of Candle", minval=20.0, maxval=60.0, group="Patterns", tooltip="Small body requirement for exhaustion patterns")
+
+// === VOLUME ===
+volumeMALength = input.int(20, "Volume MA Length", minval=5, maxval=50, group="Volume")
+
+// === REJECTION STRENGTH ===
+rejectionLookback = input.int(12, "Rejection Lookback (candles)", minval=5, maxval=30, group="Rejection Strength", tooltip="12 candles = 60 min on 5min chart")
+
+// ========================================
+// DAILY EMA CALCULATION
+// ========================================
+
+dailyEMAFast = request.security(syminfo.tickerid, "D", ta.ema(close, emaFastLength), barmerge.gaps_off, barmerge.lookahead_off)
+dailyEMASlow = request.security(syminfo.tickerid, "D", ta.ema(close, emaSlowLength), barmerge.gaps_off, barmerge.lookahead_off)
+dailyATR = request.security(syminfo.tickerid, "D", ta.atr(atrLength), barmerge.gaps_off, barmerge.lookahead_off)
+dailyClose = request.security(syminfo.tickerid, "D", close, barmerge.gaps_off, barmerge.lookahead_off)
+
+// ========================================
+// REGIME DETECTION
+// ========================================
+
+float emaGap = math.abs(dailyEMAFast - dailyEMASlow)
+float gapRatio = emaGap / dailyATR
+bool isBullishAlignment = dailyClose > dailyEMAFast and dailyEMAFast > dailyEMASlow
+bool isBearishAlignment = dailyClose < dailyEMAFast and dailyEMAFast < dailyEMASlow
+float emaSeparation = math.abs(dailyEMAFast - dailyEMASlow) / dailyEMASlow * 100
+float priceDistance = math.abs(dailyClose - dailyEMASlow) / dailyEMASlow * 100
+float alignmentBonus = (isBullishAlignment or isBearishAlignment) ? 20 : 0
+float trendStrength = math.min((emaSeparation * 10 + priceDistance * 10) + alignmentBonus, 100)
+
+var array<float> atrHistory = array.new<float>(0)
+if barstate.isconfirmed and timeframe.period == "5"
+    array.push(atrHistory, dailyATR)
+    if array.size(atrHistory) > 100
+        array.shift(atrHistory)
+
+float atrPercentile = 0.0
+if array.size(atrHistory) > 0
+    int countBelow = 0
+    for i = 0 to array.size(atrHistory) - 1
+        if array.get(atrHistory, i) < dailyATR
+            countBelow += 1
+    atrPercentile := (countBelow / array.size(atrHistory)) * 100
+
+string dailyRegime = gapRatio < regimeGapRatioRanging ? "RANGING" : gapRatio < regimeGapRatioWeak and atrPercentile < atrPercentileLow and trendStrength < trendThresholdGood ? "WEAK TREND" : gapRatio >= regimeGapRatioWeak and atrPercentile >= atrPercentileLow and atrPercentile <= atrPercentileHigh and trendStrength >= trendThresholdGood ? "TRENDING" : gapRatio >= regimeGapRatioWeak and atrPercentile < atrPercentileLow and trendStrength >= trendThresholdGood ? "CALM TREND" : atrPercentile > atrPercentileHigh ? "BREAKOUT" : atrPercentile < 20 and trendStrength < trendThresholdAcceptable ? "DEAD QUIET" : gapRatio < regimeGapRatioWeak ? "WEAK TREND" : "TRENDING"
+
+float fastEma4H = request.security(syminfo.tickerid, "240", ta.ema(close, emaFastLength), barmerge.gaps_off, barmerge.lookahead_off)
+float slowEma4H = request.security(syminfo.tickerid, "240", ta.ema(close, emaSlowLength), barmerge.gaps_off, barmerge.lookahead_off)
+float atr4H = request.security(syminfo.tickerid, "240", ta.atr(atrLength), barmerge.gaps_off, barmerge.lookahead_off)
+float close4H = request.security(syminfo.tickerid, "240", close, barmerge.gaps_off, barmerge.lookahead_off)
+float emaGap4H = math.abs(fastEma4H - slowEma4H)
+float gapRatio4H = emaGap4H / atr4H
+bool isBullish4H = close4H > fastEma4H and fastEma4H > slowEma4H
+bool isBearish4H = close4H < fastEma4H and fastEma4H < slowEma4H
+float emaSeparation4H = math.abs(fastEma4H - slowEma4H) / slowEma4H * 100
+float priceDistance4H = math.abs(close4H - slowEma4H) / slowEma4H * 100
+float alignmentBonus4H = (isBullish4H or isBearish4H) ? 20 : 0
+float trendStrength4H = math.min((emaSeparation4H * 10 + priceDistance4H * 10) + alignmentBonus4H, 100)
+
+float atrPercentile4H = 0.0
+if array.size(atrHistory) > 0
+    int countBelow4H = 0
+    for i = 0 to array.size(atrHistory) - 1
+        if array.get(atrHistory, i) < atr4H
+            countBelow4H += 1
+    atrPercentile4H := (countBelow4H / array.size(atrHistory)) * 100
+
+string regime4H = gapRatio4H < regimeGapRatioRanging ? "RANGING" : gapRatio4H < regimeGapRatioWeak and atrPercentile4H < atrPercentileLow and trendStrength4H < trendThresholdGood ? "WEAK TREND" : gapRatio4H >= regimeGapRatioWeak and atrPercentile4H >= atrPercentileLow and atrPercentile4H <= atrPercentileHigh and trendStrength4H >= trendThresholdGood ? "TRENDING" : gapRatio4H >= regimeGapRatioWeak and atrPercentile4H < atrPercentileLow and trendStrength4H >= trendThresholdGood ? "CALM TREND" : atrPercentile4H > atrPercentileHigh ? "BREAKOUT" : atrPercentile4H < 20 and trendStrength4H < trendThresholdAcceptable ? "DEAD QUIET" : gapRatio4H < regimeGapRatioWeak ? "WEAK TREND" : "TRENDING"
+
+bool dailyRanging = dailyRegime == "RANGING" or dailyRegime == "DEAD QUIET"
+bool h4Ranging = regime4H == "RANGING" or regime4H == "DEAD QUIET"
+bool dailyWeak = dailyRegime == "WEAK TREND"
+bool h4Weak = regime4H == "WEAK TREND"
+bool anyBreakout = dailyRegime == "BREAKOUT" or regime4H == "BREAKOUT"
+
+string systemStatus = dailyRanging or h4Ranging ? "RANGING" : (dailyWeak or h4Weak) ? "WEAK TREND" : anyBreakout ? "BREAKOUT" : "TRENDING"
+color systemStatusBgColor = dailyRanging or h4Ranging ? color.new(color.gray, 70) : (dailyWeak or h4Weak) ? color.new(color.yellow, 70) : anyBreakout ? color.new(color.orange, 70) : color.new(color.green, 70)
+
+bool systemPaused = dailyRanging or h4Ranging
+
+// ========================================
+// TIME QUALITY ASSESSMENT
+// ========================================
+
+int currentHourUTC = hour(time, "UTC")
+int currentHourCET = hour(time, "Europe/Paris")
+int evalHour = timezoneSetting == "CET" ? currentHourCET : currentHourUTC
+
+string timeQuality = "UNKNOWN"
+color timeQualityBgColor = color.new(color.gray, 70)
+
+if enableTimeQuality
+    if evalHour >= 14 and evalHour < 17
+        timeQuality := "⭐ PRIME"
+        timeQualityBgColor := color.new(color.green, 70)
+    else if (evalHour >= 8 and evalHour < 14) or (evalHour >= 17 and evalHour < 18)
+        timeQuality := "✅ GOOD"
+        timeQualityBgColor := color.new(color.green, 70)
+    else if (evalHour >= 7 and evalHour < 8) or (evalHour >= 18 and evalHour < 22)
+        timeQuality := "⚠️ MODERATE"
+        timeQualityBgColor := color.new(color.yellow, 70)
+    else if evalHour >= 22 or evalHour < 2
+        timeQuality := "🔴 CAUTION"
+        timeQualityBgColor := color.new(color.orange, 70)
+    else if evalHour >= 16 and evalHour < 17
+        timeQuality := "❌ AVOID"
+        timeQualityBgColor := color.new(color.red, 70)
+    else
+        timeQuality := "⚠️ MODERATE"
+        timeQualityBgColor := color.new(color.yellow, 70)
+else
+    timeQuality := "DISABLED"
+    timeQualityBgColor := color.new(color.gray, 70)
+
+// ========================================
+// AUTO-DETECTION: FETCH 1H DATA
+// ========================================
+
+h1Open = request.security(syminfo.tickerid, "60", open, barmerge.gaps_off, barmerge.lookahead_off)
+h1High = request.security(syminfo.tickerid, "60", high, barmerge.gaps_off, barmerge.lookahead_off)
+h1Low = request.security(syminfo.tickerid, "60", low, barmerge.gaps_off, barmerge.lookahead_off)
+h1Close = request.security(syminfo.tickerid, "60", close, barmerge.gaps_off, barmerge.lookahead_off)
+h1ClosePrev = request.security(syminfo.tickerid, "60", close[1], barmerge.gaps_off, barmerge.lookahead_off)
+
+h1Body = math.abs(h1Close - h1Open)
+h1Range = h1High - h1Low
+h1LowerWick = math.min(h1Close, h1Open) - h1Low
+h1UpperWick = h1High - math.max(h1Close, h1Open)
+h1BodyPosition = h1Range > 0 ? ((math.min(h1Close, h1Open) - h1Low) / h1Range) * 100 : 0
+
+h1RecentLow = request.security(syminfo.tickerid, "60", ta.lowest(low, 10), barmerge.gaps_off, barmerge.lookahead_off)
+h1RecentHigh = request.security(syminfo.tickerid, "60", ta.highest(high, 10), barmerge.gaps_off, barmerge.lookahead_off)
+
+// ========================================
+// AUTO-DETECTION: REJECTION CANDLE LOGIC
+// ========================================
+
+h1WickBodyRatioLong = h1Body > 0 ? h1LowerWick / h1Body : 0
+h1Criterion1Long = h1WickBodyRatioLong >= autoMinWickBodyRatio
+h1Criterion2Long = h1LowerWick > h1UpperWick
+h1Criterion3Long = h1Body < (h1Range * (maxBodyPercent / 100))
+h1Criterion4Long = h1BodyPosition >= autoBodyPositionThreshold
+h1Criterion5Long = h1Low <= dailyEMAFast or h1Low <= dailyEMASlow
+h1Criterion6Long = h1Low <= (dailyEMASlow + autoSlowEMAPenMax * pipSize)
+h1Criterion7Long = h1Low <= h1RecentLow
+h1Criterion8Long = h1Close >= h1ClosePrev
+h1Criterion9Long = h1Close > dailyEMASlow
+
+h1RejectionLong = h1Criterion1Long and h1Criterion2Long and h1Criterion3Long and h1Criterion4Long and h1Criterion5Long and h1Criterion6Long and h1Criterion7Long and h1Criterion8Long and h1Criterion9Long
+
+h1WickBodyRatioShort = h1Body > 0 ? h1UpperWick / h1Body : 0
+h1BodyPositionShort = h1Range > 0 ? ((h1High - math.max(h1Close, h1Open)) / h1Range) * 100 : 0
+h1Criterion1Short = h1WickBodyRatioShort >= autoMinWickBodyRatio
+h1Criterion2Short = h1UpperWick > h1LowerWick
+h1Criterion3Short = h1Body < (h1Range * (maxBodyPercent / 100))
+h1Criterion4Short = h1BodyPositionShort >= autoBodyPositionThreshold
+h1Criterion5Short = h1High >= dailyEMAFast or h1High >= dailyEMASlow
+h1Criterion6Short = h1High >= (dailyEMASlow - autoSlowEMAPenMax * pipSize)
+h1Criterion7Short = h1High >= h1RecentHigh
+h1Criterion8Short = h1Close <= h1ClosePrev
+h1Criterion9Short = h1Close < dailyEMASlow
+
+h1RejectionShort = h1Criterion1Short and h1Criterion2Short and h1Criterion3Short and h1Criterion4Short and h1Criterion5Short and h1Criterion6Short and h1Criterion7Short and h1Criterion8Short and h1Criterion9Short
+
+h1RejectionDetected = autoDirection == "LONG" ? h1RejectionLong : h1RejectionShort
+
+// ========================================
+// AUTO-CAPTURE SIGNAL LEVEL
+// ========================================
+
+var float autoSignalLevel = na
+var bool autoSignalActive = false
+var int autoSignalTime = na
+var bool autoSignalAlertFired = false
+
+var bool h1RejectionDetectedPrev = false
+
+if h1RejectionDetected and not h1RejectionDetectedPrev and not systemPaused
+    autoSignalLevel := h1Close
+    autoSignalActive := true
+    autoSignalTime := time
+    autoSignalAlertFired := false
+
+h1RejectionDetectedPrev := h1RejectionDetected
+
+if autoSignalActive and not na(autoSignalTime) and (time - autoSignalTime) > autoSignalTimeout * 60 * 60 * 1000
+    autoSignalActive := false
+    autoSignalLevel := na
+
+if autoSignalActive and not autoSignalAlertFired
+    alert("🔔 AUTO SIGNAL: " + syminfo.ticker + " " + autoDirection + " at " + str.tostring(autoSignalLevel, "#.#####"), alert.freq_once_per_bar)
+    autoSignalAlertFired := true
+
+// ========================================
+// DETERMINE ACTIVE SIGNAL
+// ========================================
+
+signalActive = detectionMode == "Auto" ? autoSignalActive : manualSignalActive
+signalLevel = detectionMode == "Auto" ? autoSignalLevel : manualSignalLevel
+trendDirection = detectionMode == "Auto" ? autoDirection : manualDirection
+
+// ========================================
+// VALIDATION WARNINGS
+// ========================================
+
+isLevelSuspicious = signalActive and (signalLevel == 0.0 or signalLevel < 0 or signalLevel > 100000)
+isSignalStale = false
+if signalActive and detectionMode == "Auto" and not na(autoSignalTime)
+    float signalAgeHours = (time - autoSignalTime) / (60 * 60 * 1000)
+    isSignalStale := signalAgeHours > (autoSignalTimeout - 0.5)
+
+// ========================================
+// ZONE CALCULATIONS
+// ========================================
+
+zoneWidthPrice = zoneWidth * pipSize
+zoneUpper = signalLevel + zoneWidthPrice
+zoneLower = signalLevel - zoneWidthPrice
+inZone = close >= zoneLower and close <= zoneUpper
+
+// ========================================
+// CANDLE CLOSE POSITION
+// ========================================
+
+candleRange = high - low
+closePosition = candleRange > 0 ? ((close - low) / candleRange) * 100 : 50
+
+// ========================================
+// REJECTION STRENGTH PERCENTILE
+// ========================================
+
+lowerWickSize = close - low
+upperWickSize = high - close
+currentWick = trendDirection == "LONG" ? lowerWickSize : upperWickSize
+
+var float[] trArray = array.new_float(rejectionLookback, 0.0)
+currentTR = ta.tr
+
+if barstate.isconfirmed
+    array.push(trArray, currentTR)
+    if array.size(trArray) > rejectionLookback
+        array.shift(trArray)
+
+wickStrongerCount = 0
+if array.size(trArray) > 0
+    for i = 0 to array.size(trArray) - 1
+        if currentWick > array.get(trArray, i)
+            wickStrongerCount += 1
+
+rejectionPercentile = array.size(trArray) > 0 ? (wickStrongerCount / array.size(trArray)) * 100 : 0
+
+// ========================================
+// VOLUME RATIO
+// ========================================
+
+volumeMA = ta.sma(volume, volumeMALength)
+volumeRatio = volumeMA > 0 ? volume / volumeMA : 0
+
+// ========================================
+// PATTERN DETECTION
+// ========================================
+
+candleBody = math.abs(close - open)
+isGreen = close > open
+isRed = close < open
+
+lowerWick = math.min(open, close) - low
+upperWick = high - math.max(open, close)
+
+wickBodyRatioLong = candleBody > 0 ? lowerWick / candleBody : 0
+wickBodyRatioShort = candleBody > 0 ? upperWick / candleBody : 0
+bodyPositionInCandle = candleRange > 0 ? ((math.min(open, close) - low) / candleRange) * 100 : 0
+
+isSmallBody = candleBody < (candleRange * (maxBodyPercent / 100))
+
+patternHammerLong = isSmallBody and wickBodyRatioLong >= minWickBodyRatio and bodyPositionInCandle >= minBodyPosition and upperWick < (candleBody * 0.5)
+patternShootingStarShort = isSmallBody and wickBodyRatioShort >= minWickBodyRatio and (100 - bodyPositionInCandle) >= minBodyPosition and lowerWick < (candleBody * 0.5)
+
+prevOpen = open[1]
+prevClose = close[1]
+prevIsRed = prevClose < prevOpen
+prevIsGreen = prevClose > prevOpen
+
+patternBullishEngulfing = isSmallBody and prevIsRed and isGreen and close > prevOpen and open < prevClose
+patternBearishEngulfing = isSmallBody and prevIsGreen and isRed and close < prevOpen and open > prevClose
+
+prev2Open = open[2]
+prev2Close = close[2]
+prev2Body = math.abs(prev2Close - prev2Open)
+prevBody2 = math.abs(prevClose - prevOpen)
+prev2IsRed = prev2Close < prev2Open
+prev2IsGreen = prev2Close > prev2Open
+prev2Midpoint = (prev2Open + prev2Close) / 2
+
+patternMorningStar = isSmallBody and prev2IsRed and prev2Body > (candleBody * 1.5) and prevBody2 < (prev2Body * 0.3) and isGreen and candleBody > (prev2Body * 0.5) and close > prev2Midpoint
+patternEveningStar = isSmallBody and prev2IsGreen and prev2Body > (candleBody * 1.5) and prevBody2 < (prev2Body * 0.3) and isRed and candleBody > (prev2Body * 0.5) and close < prev2Midpoint
+
+validLongPattern = enablePatternDetection and trendDirection == "LONG" and (patternHammerLong or patternBullishEngulfing or patternMorningStar)
+validShortPattern = enablePatternDetection and trendDirection == "SHORT" and (patternShootingStarShort or patternBearishEngulfing or patternEveningStar)
+validPattern = validLongPattern or validShortPattern
+
+isToday = (year == year(timenow) and month == month(timenow) and dayofmonth == dayofmonth(timenow))
+showPattern = validPattern and isToday
+
+patternType = validLongPattern and patternHammerLong ? "Hammer" : validLongPattern and patternBullishEngulfing ? "Engulfing" : validLongPattern and patternMorningStar ? "Morning Star" : validShortPattern and patternShootingStarShort ? "Shoot Star" : validShortPattern and patternBearishEngulfing ? "Engulfing" : validShortPattern and patternEveningStar ? "Evening Star" : "None"
+
+// ========================================
+// TRIGGER DECISION
+// ========================================
+
+bool regimeAllowsExecution = not systemPaused
+triggerCondition = signalActive and inZone and validPattern and volumeRatio >= 1.2 and not isLevelSuspicious and regimeAllowsExecution
+
+// System Mode (Elegant Hybrid)
+string systemMode = systemPaused ? "⏸️ Monitoring" : anyBreakout ? "🔥 Caution" : (dailyWeak or h4Weak) ? "⚠️ Restricted" : "✅ Active"
+color systemModeBgColor = systemPaused ? color.new(color.gray, 70) : anyBreakout ? color.new(color.orange, 70) : (dailyWeak or h4Weak) ? color.new(color.yellow, 70) : color.new(color.green, 70)
+
+// ========================================
+// PLOTS ON MAIN CHART
+// ========================================
+
+plot(showDailyEMAs ? dailyEMAFast : na, "Daily Fast EMA", color=#0000FF, linewidth=2)
+plot(showDailyEMAs ? dailyEMASlow : na, "Daily Slow EMA", color=#FF6600, linewidth=2)
+
+// Signal Level - only show if not paused
+plot(signalActive and not systemPaused ? signalLevel : na, "Signal Level", color=#9C27B0, linewidth=2, style=plot.style_cross)
+
+// Entry Zone - HIDE when paused
+plot(signalActive and not systemPaused ? zoneUpper : na, "Zone Upper", color=color.gray, linewidth=1, style=plot.style_circles)
+plot(signalActive and not systemPaused ? zoneLower : na, "Zone Lower", color=color.gray, linewidth=1, style=plot.style_circles)
+
+upperZonePlot = plot(signalActive and not systemPaused ? zoneUpper : na, display=display.none)
+lowerZonePlot = plot(signalActive and not systemPaused ? zoneLower : na, display=display.none)
+fill(upperZonePlot, lowerZonePlot, color=trendDirection == "LONG" ? color.new(#00FF00, 90) : color.new(#FF0000, 90), title="Entry Zone")
+
+plotshape(isLevelSuspicious, "⚠️ CHECK LEVEL", location=location.top, color=color.new(color.red, 0), style=shape.xcross, size=size.large, text="BAD LEVEL")
+plotshape(isSignalStale, "⚠️ STALE", location=location.top, color=color.new(color.orange, 0), style=shape.xcross, size=size.normal, text="STALE")
+
+plotshape(showPattern and validLongPattern and patternHammerLong, "Hammer", location=location.belowbar, color=#00AA00, style=shape.triangleup, size=size.small, text="H")
+plotshape(showPattern and validLongPattern and patternBullishEngulfing, "Bull Engulf", location=location.belowbar, color=#00CC00, style=shape.triangleup, size=size.small, text="E")
+plotshape(showPattern and validLongPattern and patternMorningStar, "Morning Star", location=location.belowbar, color=#00FF00, style=shape.triangleup, size=size.small, text="MS")
+
+plotshape(showPattern and validShortPattern and patternShootingStarShort, "Shoot Star", location=location.abovebar, color=#AA0000, style=shape.triangledown, size=size.small, text="S")
+plotshape(showPattern and validShortPattern and patternBearishEngulfing, "Bear Engulf", location=location.abovebar, color=#CC0000, style=shape.triangledown, size=size.small, text="E")
+plotshape(showPattern and validShortPattern and patternEveningStar, "Evening Star", location=location.abovebar, color=#FF0000, style=shape.triangledown, size=size.small, text="ES")
+
+plotshape(triggerCondition, "TRIGGER FIRE", location=trendDirection == "LONG" ? location.belowbar : location.abovebar, color=trendDirection == "LONG" ? color.new(#00FF00, 0) : color.new(#FF0000, 0), style=shape.diamond, size=size.normal, text="EXEC")
+
+// ========================================
+// MASTER DECISION TABLE (ELEGANT HYBRID)
+// ========================================
+
+var table masterTable = table.new(position.top_right, 2, 15, border_width=1, border_color=color.black, frame_width=2, frame_color=color.black)
+
+if barstate.islast
+    // Header
+    table.cell(masterTable, 0, 0, "TRIGGER MASTER", text_color=color.white, bgcolor=color.new(color.black, 0), text_size=size.normal)
+    table.cell(masterTable, 1, 0, trendDirection, text_color=color.white, bgcolor=trendDirection == "LONG" ? color.new(#00AA00, 0) : color.new(#AA0000, 0), text_size=size.normal)
+    
+    // Detection Mode
+    table.cell(masterTable, 0, 1, "Mode", text_color=color.black, bgcolor=color.new(color.white, 0), text_size=size.small)
+    modeBg = detectionMode == "Auto" ? color.new(#0080FF, 70) : color.new(#FFA500, 70)
+    table.cell(masterTable, 1, 1, detectionMode, text_color=color.black, bgcolor=modeBg, text_size=size.small)
+    
+    // System Regime (Elegant - no symbols)
+    table.cell(masterTable, 0, 2, "System Regime", text_color=color.black, bgcolor=color.new(color.white, 0), text_size=size.small)
+    table.cell(masterTable, 1, 2, systemStatus, text_color=color.black, bgcolor=systemStatusBgColor, text_size=size.small)
+    
+    // Gap Metrics (NEW - show when ranging)
+    if systemPaused
+        table.cell(masterTable, 0, 3, "Gap Ratio", text_color=color.black, bgcolor=color.new(color.white, 0), text_size=size.small)
+        string gapMetrics = "D:" + str.tostring(gapRatio, "#.##") + " 4H:" + str.tostring(gapRatio4H, "#.##")
+        table.cell(masterTable, 1, 3, gapMetrics, text_color=color.black, bgcolor=color.new(color.white, 0), text_size=size.tiny)
+    else
+        table.cell(masterTable, 0, 3, "Time Quality", text_color=color.black, bgcolor=color.new(color.white, 0), text_size=size.small)
+        table.cell(masterTable, 1, 3, timeQuality, text_color=color.black, bgcolor=timeQualityBgColor, text_size=size.small)
+    
+    // System Mode (Elegant)
+    table.cell(masterTable, 0, 4, "System Mode", text_color=color.black, bgcolor=color.new(color.white, 0), text_size=size.small)
+    table.cell(masterTable, 1, 4, systemMode, text_color=color.black, bgcolor=systemModeBgColor, text_size=size.small)
+    
+    // Signal Active
+    table.cell(masterTable, 0, 5, "Signal Active", text_color=color.black, bgcolor=color.new(color.white, 0), text_size=size.small)
+    activeBg = signalActive ? color.new(#00FF00, 70) : color.new(#FF0000, 70)
+    table.cell(masterTable, 1, 5, signalActive ? "YES" : "NO", text_color=color.black, bgcolor=activeBg, text_size=size.normal)
+    
+    // Signal Level
+    table.cell(masterTable, 0, 6, "Signal Level", text_color=color.black, bgcolor=color.new(color.white, 0), text_size=size.small)
+    levelBg = isLevelSuspicious ? color.new(#FF0000, 70) : color.new(color.white, 0)
+    table.cell(masterTable, 1, 6, signalActive ? str.tostring(signalLevel, "#.#####") : "-", text_color=color.black, bgcolor=levelBg, text_size=size.small)
+    
+    // In Zone
+    table.cell(masterTable, 0, 7, "In Zone", text_color=color.black, bgcolor=color.new(color.white, 0), text_size=size.small)
+    inZoneBg = signalActive and inZone ? color.new(#00FF00, 70) : color.new(#FF0000, 70)
+    table.cell(masterTable, 1, 7, signalActive ? (inZone ? "YES ✓" : "NO") : "-", text_color=color.black, bgcolor=inZoneBg, text_size=size.normal)
+    
+    // Close Position
+    table.cell(masterTable, 0, 8, "Close Pos", text_color=color.black, bgcolor=color.new(color.white, 0), text_size=size.small)
+    closeBg = closePosition >= 75 ? color.new(#00FF00, 70) : closePosition >= 60 ? color.new(#7FFF00, 70) : closePosition >= 50 ? color.new(#FFA500, 70) : color.new(#FF0000, 70)
+    table.cell(masterTable, 1, 8, str.tostring(closePosition, "#.#") + "%", text_color=color.black, bgcolor=closeBg, text_size=size.normal)
+    
+    // Rejection Strength
+    table.cell(masterTable, 0, 9, "Rejection", text_color=color.black, bgcolor=color.new(color.white, 0), text_size=size.small)
+    rejBg = rejectionPercentile >= 90 ? color.new(#006400, 70) : rejectionPercentile >= 75 ? color.new(#228B22, 70) : rejectionPercentile >= 50 ? color.new(#FF8C00, 70) : color.new(#8B0000, 70)
+    table.cell(masterTable, 1, 9, str.tostring(rejectionPercentile, "#.#") + "%", text_color=color.black, bgcolor=rejBg, text_size=size.normal)
+    
+    // Volume Ratio
+    table.cell(masterTable, 0, 10, "Volume", text_color=color.black, bgcolor=color.new(color.white, 0), text_size=size.small)
+    volBg = volumeRatio >= 2.0 ? color.new(#006400, 70) : volumeRatio >= 1.5 ? color.new(#228B22, 70) : volumeRatio >= 1.2 ? color.new(#FF8C00, 70) : color.new(#8B0000, 70)
+    table.cell(masterTable, 1, 10, str.tostring(volumeRatio, "#.##") + "x", text_color=color.black, bgcolor=volBg, text_size=size.normal)
+    
+    // Pattern
+    table.cell(masterTable, 0, 11, "Pattern", text_color=color.black, bgcolor=color.new(color.white, 0), text_size=size.small)
+    patternBg = showPattern ? color.new(#00FF00, 70) : color.new(color.white, 0)
+    table.cell(masterTable, 1, 11, patternType, text_color=color.black, bgcolor=patternBg, text_size=size.small)
+    
+    // Position Action (Elegant)
+    leverageAction = systemPaused ? "Wait for Setup" : anyBreakout ? "Reduce 50%" : volumeRatio >= 1.5 ? "Full Size" : volumeRatio >= 1.2 ? "Reduce 25%" : "Reduce 50%"
+    table.cell(masterTable, 0, 12, "Position", text_color=color.black, bgcolor=color.new(color.white, 0), text_size=size.small)
+    posBg = systemPaused ? color.new(color.gray, 70) : anyBreakout ? color.new(color.orange, 70) : volBg
+    table.cell(masterTable, 1, 12, leverageAction, text_color=color.black, bgcolor=posBg, text_size=size.small)
+    
+    // Need to Trend (NEW - show when paused)
+    if systemPaused
+        table.cell(masterTable, 0, 13, "Need Gap ≥", text_color=color.black, bgcolor=color.new(color.white, 0), text_size=size.small)
+        table.cell(masterTable, 1, 13, str.tostring(regimeGapRatioWeak, "#.##") + "x", text_color=color.black, bgcolor=color.new(color.gray, 70), text_size=size.small)
+    
+    // TRIGGER DECISION (Elegant)
+    table.cell(masterTable, 0, 14, "DECISION", text_color=color.white, bgcolor=color.new(color.black, 0), text_size=size.normal)
+    triggerBg = systemPaused ? color.new(color.gray, 50) : triggerCondition ? color.new(#00FF00, 0) : color.new(#FF0000, 70)
+    triggerText = systemPaused ? "⏸️ STANDBY" : triggerCondition ? "🔥 FIRE!" : "Wait"
+    triggerTextColor = systemPaused ? color.white : color.black
+    table.cell(masterTable, 1, 14, triggerText, text_color=triggerTextColor, bgcolor=triggerBg, text_size=size.large)

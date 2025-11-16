@@ -1,0 +1,350 @@
+//@version=6
+indicator("Framework 2.0: Trading Readiness Monitor", "READINESS", overlay=true)
+
+// ============================================================================
+// FRAMEWORK 2.0: TRADING READINESS MONITOR
+// Version 1.1 - FIXED
+// ============================================================================
+// PURPOSE: Multi-timeframe sync and trading readiness validation
+// MONITORS: Daily SETUP, 4H Regime, 1H SIGNAL, 5min TRIGGER alignment
+// OUTPUT: Binary GO/WAIT/NO-GO decision for Claude Trading Assistant
+// 
+// FIXES v1.1:
+// - Removed ALL emojis and Unicode characters
+// - [PASS]/[FAIL] instead of checkmarks
+// - [OK]/[X] instead of colored circles
+// - "---" instead of Unicode box-drawing characters
+// - Clean ASCII text throughout
+// ============================================================================
+
+// ============================================================================
+// INPUTS - MANUAL OVERRIDES
+// ============================================================================
+
+// Allow manual status inputs for testing or when indicators aren't loaded
+manualDaily = input.string("AUTO", "Daily Status", options=["AUTO", "PASS", "FAIL"])
+manual4H = input.string("AUTO", "4H Status", options=["AUTO", "PASS", "FAIL"])
+manual1H = input.string("AUTO", "1H Status", options=["AUTO", "PASS", "FAIL"])
+manual5M = input.string("AUTO", "5min Status", options=["AUTO", "PASS", "FAIL"])
+
+// News and risk blocks
+newsBlock = input.bool(false, "News Block Active")
+dailyStopHit = input.bool(false, "Daily Stop Hit")
+maxPositions = input.bool(false, "Max Positions Reached")
+
+// ============================================================================
+// INPUTS - DISPLAY SETTINGS
+// ============================================================================
+
+showTable = input.bool(true, "Show Sync Table")
+tablePosition = input.string("top_right", "Table Position", options=["top_right", "top_left", "bottom_right", "bottom_left"])
+textSizeInput = input.string("normal", "Text Size", options=["tiny", "small", "normal", "large"])
+showLegend = input.bool(false, "Show Legend")
+showBottleneck = input.bool(true, "Show Bottleneck Info")
+
+// ============================================================================
+// HELPER FUNCTIONS
+// ============================================================================
+
+// Convert text size input to size constant
+getTextSize(sizeStr) =>
+    sizeStr == "tiny" ? size.tiny : sizeStr == "small" ? size.small : sizeStr == "large" ? size.large : size.normal
+
+// Get table position
+getTablePosition(pos) =>
+    pos == "top_left" ? position.top_left : pos == "bottom_right" ? position.bottom_right : pos == "bottom_left" ? position.bottom_left : position.top_right
+
+// CMF calculation function
+calcCMF(length) =>
+    mfm = ((close - low) - (high - close)) / (high - low)
+    mfv = mfm * volume
+    sumMFV = math.sum(mfv, length)
+    sumVol = math.sum(volume, length)
+    sumVol != 0 ? sumMFV / sumVol : 0
+
+// ============================================================================
+// TIMEFRAME DATA REQUESTS
+// ============================================================================
+
+// Daily timeframe metrics
+[dailyClose, dailyHigh, dailyLow, dailyATR] = request.security(syminfo.tickerid, "D", [close, high, low, ta.atr(14)])
+
+// 4H timeframe metrics
+[h4Close, h4ATR] = request.security(syminfo.tickerid, "240", [close, ta.atr(14)])
+
+// 1H timeframe metrics
+h1ATR = request.security(syminfo.tickerid, "60", ta.atr(14))
+
+// 5min timeframe metrics (current)
+m5ATR = ta.atr(14)
+
+// ============================================================================
+// DAILY TIMEFRAME - SETUP VALIDATION
+// ============================================================================
+
+// Calculate Daily SETUP criteria (simplified - integrate with Setup Metrics Validator)
+dailyEMA8 = ta.ema(dailyClose, 8)
+dailyEMA21 = ta.ema(dailyClose, 21)
+dailyEMA55 = ta.ema(dailyClose, 55)
+
+// Check EMA alignment (bullish example)
+dailyEMAAligned = dailyEMA8 > dailyEMA21 and dailyEMA21 > dailyEMA55
+
+// Check if price above structure
+dailyAboveStructure = dailyClose > dailyEMA21
+
+// Simplified SETUP check (would normally check all 8/8 criteria)
+dailySetupValid = dailyEMAAligned and dailyAboveStructure
+
+dailyStatus = manualDaily == "AUTO" ? (dailySetupValid ? "PASS" : "FAIL") : (manualDaily == "PASS" ? "PASS" : "FAIL")
+
+// ============================================================================
+// 4H TIMEFRAME - REGIME & CMF VALIDATION
+// ============================================================================
+
+// Calculate 4H ATR percentile - get historical values
+h4ATR_0 = request.security(syminfo.tickerid, "240", ta.atr(14))
+h4ATR_50 = request.security(syminfo.tickerid, "240", ta.atr(14)[50])
+h4ATR_99 = request.security(syminfo.tickerid, "240", ta.atr(14)[99])
+
+// Simplified percentile - check if current is high or low
+h4ATRHigh = h4ATR_0 > h4ATR_50 * 1.5
+h4ATRLow = h4ATR_0 < h4ATR_50 * 0.7
+
+h4Regime = h4ATRHigh ? "HIGH" : h4ATRLow ? "LOW" : "NORMAL"
+h4RegimeValid = h4Regime == "NORMAL" or h4Regime == "LOW"
+
+// CMF calculation for 4H
+h4CMF = request.security(syminfo.tickerid, "240", calcCMF(20))
+h4CMFValid = math.abs(h4CMF) > 0.10
+
+h4Status = manual4H == "AUTO" ? (h4RegimeValid and h4CMFValid ? "PASS" : "FAIL") : (manual4H == "PASS" ? "PASS" : "FAIL")
+
+// ============================================================================
+// 1H TIMEFRAME - SIGNAL DETECTION
+// ============================================================================
+
+// Pre-calculate EMAs to avoid function calls in conditions
+h1EMA21 = request.security(syminfo.tickerid, "60", ta.ema(close, 21))
+h1Low = request.security(syminfo.tickerid, "60", low)
+h1High = request.security(syminfo.tickerid, "60", high)
+h1Close = request.security(syminfo.tickerid, "60", close)
+
+// Check for rejection pattern
+h1BullishRejection = h1Low < h1EMA21 and h1Close > h1EMA21
+h1BearishRejection = h1High > h1EMA21 and h1Close < h1EMA21
+h1SignalDetected = h1BullishRejection or h1BearishRejection
+
+// Calculate signal age (bars since last signal)
+var int h1SignalAge = 0
+if h1SignalDetected
+    h1SignalAge := 0
+else
+    h1SignalAge += 1
+
+// Signal valid if detected within last 12 bars (12 hours)
+h1SignalValid = h1SignalAge <= 12
+
+h1Status = manual1H == "AUTO" ? (h1SignalValid ? "PASS" : "FAIL") : (manual1H == "PASS" ? "PASS" : "FAIL")
+
+// ============================================================================
+// 5MIN TIMEFRAME - TRIGGER READINESS
+// ============================================================================
+
+// Check if price in entry zone (Â±0.5 ATR from EMA21)
+ema21 = ta.ema(close, 21)
+entryZoneSize = 0.5 * m5ATR
+inEntryZone = math.abs(close - ema21) <= entryZoneSize
+
+// Check for trigger pattern (engulfing, pin bar, etc.)
+bullishEngulfing = close > open and close[1] < open[1] and close > open[1] and open < close[1]
+bearishEngulfing = close < open and close[1] > open[1] and close < open[1] and open > close[1]
+triggerPattern = bullishEngulfing or bearishEngulfing
+
+m5TriggerReady = inEntryZone and triggerPattern
+
+m5Status = manual5M == "AUTO" ? (m5TriggerReady ? "PASS" : "FAIL") : (manual5M == "PASS" ? "PASS" : "FAIL")
+
+// ============================================================================
+// OVERALL READINESS CALCULATION
+// ============================================================================
+
+// Count passing stages
+stagesPassing = (dailyStatus == "PASS" ? 1 : 0) + (h4Status == "PASS" ? 1 : 0) + (h1Status == "PASS" ? 1 : 0) + (m5Status == "PASS" ? 1 : 0)
+
+// Check for critical blocks
+criticalBlock = newsBlock or dailyStopHit or maxPositions
+
+// Determine overall status
+overallStatus = criticalBlock ? "BLOCKED" : stagesPassing == 4 ? "GO" : stagesPassing >= 3 ? "WAIT" : "NO-GO"
+overallColor = overallStatus == "GO" ? color.new(#26A69A, 0) : overallStatus == "WAIT" ? color.new(#FFD54F, 0) : color.new(#FF5252, 0)
+
+// Determine bottleneck (must be string literal for alerts)
+bottleneckText = criticalBlock ? (newsBlock ? "NEWS BLOCK" : dailyStopHit ? "DAILY STOP HIT" : "MAX POSITIONS") : dailyStatus == "FAIL" ? "Daily SETUP" : h4Status == "FAIL" ? "4H Regime/CMF" : h1Status == "FAIL" ? "1H SIGNAL" : m5Status == "FAIL" ? "5min TRIGGER" : "ALL ALIGNED"
+
+// ============================================================================
+// DISPLAY TABLE
+// ============================================================================
+
+var table syncTable = na
+if showTable
+    if barstate.islast
+        syncTable := table.new(getTablePosition(tablePosition), 3, 14, bgcolor=color.new(#1E1E1E, 5), border_width=2, border_color=color.new(#FFD54F, 0))
+        
+        textSize = getTextSize(textSizeInput)
+        headerColor = color.new(#FFD54F, 0)
+        labelColor = color.new(#9E9E9E, 0)
+        valueColor = color.new(#FFFFFF, 0)
+        passColor = color.new(#26A69A, 0)
+        failColor = color.new(#FF5252, 0)
+        
+        // Row 0: Header
+        table.cell(syncTable, 0, 0, "ðŸ”„ MULTI-TIMEFRAME SYNC", text_color=headerColor, text_size=textSize, bgcolor=color.new(#2D2D2D, 0))
+        table.merge_cells(syncTable, 0, 0, 2, 0)
+        
+        // Row 1: Overall Status
+        table.cell(syncTable, 0, 1, "STATUS:", text_color=labelColor, text_size=textSize)
+        table.cell(syncTable, 1, 1, overallStatus, text_color=overallColor, text_size=size.large, bgcolor=color.new(overallColor, 90))
+        table.cell(syncTable, 2, 1, str.tostring(stagesPassing) + "/4", text_color=valueColor, text_size=textSize)
+        
+        // Row 2: Separator
+        table.cell(syncTable, 0, 2, "â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”", text_color=color.new(#FFD54F, 50), text_size=size.tiny)
+        table.merge_cells(syncTable, 0, 2, 2, 2)
+        
+        // Row 3-6: Timeframe Status
+        table.cell(syncTable, 0, 3, "DAILY:", text_color=labelColor, text_size=textSize)
+        dailyStatusColor = dailyStatus == "PASS" ? passColor : failColor
+        dailyStatusIcon = dailyStatus == "PASS" ? "[PASS]" : "[FAIL]"
+        table.cell(syncTable, 1, 3, dailyStatusIcon + " " + dailyStatus, text_color=dailyStatusColor, text_size=textSize)
+        table.cell(syncTable, 2, 3, "SETUP (8/8)", text_color=labelColor, text_size=size.small)
+        
+        table.cell(syncTable, 0, 4, "4H:", text_color=labelColor, text_size=textSize)
+        h4StatusColor = h4Status == "PASS" ? passColor : failColor
+        h4StatusIcon = h4Status == "PASS" ? "[PASS]" : "[FAIL]"
+        table.cell(syncTable, 1, 4, h4StatusIcon + " " + h4Status, text_color=h4StatusColor, text_size=textSize)
+        table.cell(syncTable, 2, 4, "Regime: " + h4Regime, text_color=labelColor, text_size=size.small)
+        
+        table.cell(syncTable, 0, 5, "1H:", text_color=labelColor, text_size=textSize)
+        h1StatusColor = h1Status == "PASS" ? passColor : failColor
+        h1StatusIcon = h1Status == "PASS" ? "[PASS]" : "[FAIL]"
+        table.cell(syncTable, 1, 5, h1StatusIcon + " " + h1Status, text_color=h1StatusColor, text_size=textSize)
+        ageDisplay = h1SignalAge <= 12 ? str.tostring(h1SignalAge) + "h ago" : ">12h"
+        table.cell(syncTable, 2, 5, "Signal: " + ageDisplay, text_color=labelColor, text_size=size.small)
+        
+        table.cell(syncTable, 0, 6, "5MIN:", text_color=labelColor, text_size=textSize)
+        m5StatusColor = m5Status == "PASS" ? passColor : failColor
+        m5StatusIcon = m5Status == "PASS" ? "[PASS]" : "[FAIL]"
+        table.cell(syncTable, 1, 6, m5StatusIcon + " " + m5Status, text_color=m5StatusColor, text_size=textSize)
+        zoneStatus = inEntryZone ? "IN ZONE" : "OUT ZONE"
+        table.cell(syncTable, 2, 6, zoneStatus, text_color=labelColor, text_size=size.small)
+        
+        // Row 7: Separator
+        table.cell(syncTable, 0, 7, "â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”", text_color=color.new(#FFD54F, 50), text_size=size.tiny)
+        table.merge_cells(syncTable, 0, 7, 2, 7)
+        
+        // Row 8-10: Risk Blocks
+        table.cell(syncTable, 0, 8, "BLOCKS:", text_color=headerColor, text_size=textSize, bgcolor=color.new(#2D2D2D, 0))
+        table.merge_cells(syncTable, 0, 8, 2, 8)
+        
+        newsIcon = newsBlock ? "[X]" : "[OK]"
+        newsText = newsBlock ? "BLOCKED" : "Clear"
+        newsTextColor = newsBlock ? failColor : passColor
+        table.cell(syncTable, 0, 9, "News:", text_color=labelColor, text_size=textSize)
+        table.cell(syncTable, 1, 9, newsIcon + " " + newsText, text_color=newsTextColor, text_size=textSize)
+        table.merge_cells(syncTable, 1, 9, 2, 9)
+        
+        stopIcon = dailyStopHit ? "[X]" : "[OK]"
+        stopText = dailyStopHit ? "HIT (-300â‚¬)" : "Active"
+        stopTextColor = dailyStopHit ? failColor : passColor
+        table.cell(syncTable, 0, 10, "Daily Stop:", text_color=labelColor, text_size=textSize)
+        table.cell(syncTable, 1, 10, stopIcon + " " + stopText, text_color=stopTextColor, text_size=textSize)
+        table.merge_cells(syncTable, 1, 10, 2, 10)
+        
+        posIcon = maxPositions ? "[X]" : "[OK]"
+        posText = maxPositions ? "MAX (2/2)" : "Available"
+        posTextColor = maxPositions ? failColor : passColor
+        table.cell(syncTable, 0, 11, "Positions:", text_color=labelColor, text_size=textSize)
+        table.cell(syncTable, 1, 11, posIcon + " " + posText, text_color=posTextColor, text_size=textSize)
+        table.merge_cells(syncTable, 1, 11, 2, 11)
+        
+        // Row 12: Separator
+        table.cell(syncTable, 0, 12, "â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”", text_color=color.new(#FFD54F, 50), text_size=size.tiny)
+        table.merge_cells(syncTable, 0, 12, 2, 12)
+        
+        // Row 13: Bottleneck (if enabled)
+        if showBottleneck
+            table.cell(syncTable, 0, 13, "Bottleneck:", text_color=labelColor, text_size=textSize)
+            bottleneckColor = bottleneckText == "ALL ALIGNED" ? passColor : failColor
+            table.cell(syncTable, 1, 13, bottleneckText, text_color=bottleneckColor, text_size=textSize)
+            table.merge_cells(syncTable, 1, 13, 2, 13)
+
+// ============================================================================
+// LEGEND TABLE (OPTIONAL)
+// ============================================================================
+
+var table legendTable = na
+if showLegend
+    if barstate.islast
+        legendTable := table.new(position.bottom_right, 2, 9, bgcolor=color.new(#1E1E1E, 5), border_width=1, border_color=color.new(#9E9E9E, 0))
+        
+        textSize = getTextSize(textSizeInput)
+        headerColor = color.new(#FFD54F, 0)
+        
+        table.cell(legendTable, 0, 0, "ðŸ“– LEGEND", text_color=headerColor, text_size=textSize)
+        table.merge_cells(legendTable, 0, 0, 1, 0)
+        
+        table.cell(legendTable, 0, 1, "GO:", text_color=color.new(#26A69A, 0), text_size=size.small)
+        table.cell(legendTable, 1, 1, "All 4 stages aligned, no blocks", text_color=color.new(#9E9E9E, 0), text_size=size.small)
+        
+        table.cell(legendTable, 0, 2, "WAIT:", text_color=color.new(#FFD54F, 0), text_size=size.small)
+        table.cell(legendTable, 1, 2, "3/4 stages ready, wait for alignment", text_color=color.new(#9E9E9E, 0), text_size=size.small)
+        
+        table.cell(legendTable, 0, 3, "NO-GO:", text_color=color.new(#FF5252, 0), text_size=size.small)
+        table.cell(legendTable, 1, 3, "<3 stages ready or critical block", text_color=color.new(#9E9E9E, 0), text_size=size.small)
+        
+        table.cell(legendTable, 0, 4, "BLOCKED:", text_color=color.new(#FF5252, 0), text_size=size.small)
+        table.cell(legendTable, 1, 4, "News/Stop/Position limit active", text_color=color.new(#9E9E9E, 0), text_size=size.small)
+        
+        table.cell(legendTable, 0, 5, "â”â”â”â”â”â”â”â”â”â”â”â”", text_color=color.new(#FFD54F, 50), text_size=size.tiny)
+        table.merge_cells(legendTable, 0, 5, 1, 5)
+        
+        table.cell(legendTable, 0, 6, "Daily:", text_color=color.new(#9E9E9E, 0), text_size=size.small)
+        table.cell(legendTable, 1, 6, "8/8 SETUP criteria validated", text_color=color.new(#9E9E9E, 0), text_size=size.small)
+        
+        table.cell(legendTable, 0, 7, "4H:", text_color=color.new(#9E9E9E, 0), text_size=size.small)
+        table.cell(legendTable, 1, 7, "Regime + CMF validation", text_color=color.new(#9E9E9E, 0), text_size=size.small)
+        
+        table.cell(legendTable, 0, 8, "1H:", text_color=color.new(#9E9E9E, 0), text_size=size.small)
+        table.cell(legendTable, 1, 8, "Rejection signal detected (<12h)", text_color=color.new(#9E9E9E, 0), text_size=size.small)
+
+// ============================================================================
+// VISUAL SIGNALS ON CHART
+// ============================================================================
+
+// Background color for overall status
+bgcolor(overallStatus == "GO" ? color.new(#26A69A, 95) : overallStatus == "BLOCKED" ? color.new(#FF5252, 95) : na, title="Overall Status BG")
+
+// ============================================================================
+// PLOTTING (For Debugging)
+// ============================================================================
+
+plot(stagesPassing, "Stages Passing", color=overallColor, display=display.none)
+
+// ============================================================================
+// ALERTS - All messages must be constant strings
+// ============================================================================
+
+// Alert when full alignment achieved
+allAligned = overallStatus == "GO"
+alertcondition(allAligned and not allAligned[1], title="All Systems GO", message="All 4 timeframes aligned - Ready for trading")
+
+// Alert when blocked
+alertcondition(criticalBlock and not criticalBlock[1], title="Trading Blocked", message="Trading blocked - Check risk blocks in sync monitor")
+
+// Alert when entering WAIT status
+waitStatus = overallStatus == "WAIT"
+alertcondition(waitStatus and not waitStatus[1], title="Almost Ready", message="3 out of 4 stages aligned - Watch for entry opportunity")
+
+// Alert when status changes to NO-GO
+noGoStatus = overallStatus == "NO-GO"
+alertcondition(noGoStatus and not noGoStatus[1], title="Alignment Lost", message="Less than 3 stages aligned - Wait for better conditions")

@@ -1,0 +1,383 @@
+//@version=6
+indicator("Framework 2.0: Risk & Position Dashboard", "RISK+POSITION", overlay=true)
+
+// ============================================================================
+// FRAMEWORK 2.0: RISK & POSITION MANAGEMENT DASHBOARD
+// Version 1.1 - FIXED
+// ============================================================================
+// FIXES:
+// - Timezone corrected to Europe/Berlin (CET)
+// - Removed Unicode tree characters for compatibility
+// - Clean text display for all platforms
+// ============================================================================
+
+// ============================================================================
+// SECTION 1: DISPLAY SETTINGS
+// ============================================================================
+
+string mainTablePos = input.string("top_left", "Main Dashboard Position", options=["top_left", "top_center", "top_right", "middle_left", "middle_center", "middle_right", "bottom_left", "bottom_center", "bottom_right"], group="Display")
+string mainTableSize = input.string("normal", "Main Table Size", options=["tiny", "small", "normal", "large"], group="Display")
+bool showKOValidator = input.bool(true, "Show KO Validator Section", group="Display")
+bool showPosCalculator = input.bool(true, "Show Position Calculator Section", group="Display")
+bool showLegend = input.bool(false, "Show Legend", group="Display")
+
+// ============================================================================
+// SECTION 2: RISK MANAGEMENT INPUTS
+// ============================================================================
+
+// Daily P&L Settings
+float currentDayPnL = input.float(0.0, "Current Day P&L (EUR)", tooltip="Update as trades close", step=10.0, group="Risk: Daily P&L")
+float openPositionPnL = input.float(0.0, "Open Position P&L (EUR)", tooltip="Floating P&L", step=1.0, group="Risk: Daily P&L")
+
+// P&L Thresholds (4-Tier System)
+float pnlSafe = input.float(-200.0, "Safe Threshold", step=10.0, group="Risk: Daily P&L")
+float pnlCaution = input.float(-250.0, "Caution Threshold", step=10.0, group="Risk: Daily P&L")
+float pnlWarning = input.float(-280.0, "Warning Threshold", step=10.0, group="Risk: Daily P&L")
+float pnlStop = input.float(-300.0, "Hard Stop", step=10.0, group="Risk: Daily P&L")
+
+// Position Settings
+int currentPositions = input.int(0, "Current Open Positions", minval=0, maxval=2, group="Risk: Positions")
+int maxPositions = input.int(2, "Maximum Positions", minval=1, maxval=5, group="Risk: Positions")
+
+string pos1Symbol = input.string("", "Position 1 Symbol", group="Risk: Positions")
+string pos1Direction = input.string("NONE", "Position 1 Direction", options=["NONE", "LONG", "SHORT"], group="Risk: Positions")
+float pos1PnL = input.float(0.0, "Position 1 P&L (EUR)", step=1.0, group="Risk: Positions")
+
+string pos2Symbol = input.string("", "Position 2 Symbol", group="Risk: Positions")
+string pos2Direction = input.string("NONE", "Position 2 Direction", options=["NONE", "LONG", "SHORT"], group="Risk: Positions")
+float pos2PnL = input.float(0.0, "Position 2 P&L (EUR)", step=1.0, group="Risk: Positions")
+
+// Trading Hours
+int tradingStartHour = input.int(9, "Trading Start Hour (CET)", minval=0, maxval=23, group="Risk: Time")
+int tradingStartMinute = input.int(0, "Trading Start Minute", minval=0, maxval=59, group="Risk: Time")
+int tradingEndHour = input.int(19, "Trading End Hour (CET)", minval=0, maxval=23, group="Risk: Time")
+int tradingEndMinute = input.int(0, "Trading End Minute", minval=0, maxval=59, group="Risk: Time")
+
+// Friday Settings
+int fridayCloseHour = input.int(18, "Friday Close Hour", minval=0, maxval=23, group="Risk: Friday")
+int fridayCloseMinute = input.int(0, "Friday Close Minute", minval=0, maxval=59, group="Risk: Friday")
+int fridayBlockHour = input.int(17, "Friday Block Entries Hour", minval=0, maxval=23, group="Risk: Friday")
+int fridayBlockMinute = input.int(30, "Friday Block Entries Minute", minval=0, maxval=59, group="Risk: Friday")
+
+// Session
+string sessionStrength = input.string("PRIME", "Session Strength", options=["PRIME", "ACCEPTABLE", "WEAK"], group="Risk: Session")
+float sessionMaxSize = input.float(100.0, "Session Max Position (EUR)", step=5.0, group="Risk: Session")
+
+// ============================================================================
+// SECTION 3: KO VALIDATOR INPUTS
+// ============================================================================
+
+bool koHasSetup = input.bool(false, "Setup Configured?", tooltip="Is there an active trading setup?", group="KO: Setup")
+string koDirection = input.string("LONG", "Setup Direction", options=["LONG", "SHORT"], group="KO: Setup")
+float koEntry = input.float(0.0, "Entry Price", step=0.0001, group="KO: Setup")
+float koStop = input.float(0.0, "Stop Loss Price", step=0.0001, group="KO: Setup")
+float koKOLevel = input.float(0.0, "Selected KO Level", step=0.0001, tooltip="Your chosen KO certificate level", group="KO: Setup")
+
+// ============================================================================
+// SECTION 4: POSITION CALCULATOR INPUTS
+// ============================================================================
+
+int baseRisk = input.int(100, "Base Risk (EUR)", minval=25, maxval=200, step=25, group="Calculator: Risk")
+float stopATR = input.float(1.0, "Stop Distance (ATR)", minval=0.5, maxval=2.0, step=0.1, group="Calculator: Risk")
+int leverage = input.int(20, "Leverage", minval=10, maxval=30, group="Calculator: Risk")
+
+string manualRegime = input.string("AUTO", "Volatility Regime", options=["AUTO", "LOW", "NORMAL", "HIGH"], group="Calculator: Adjustments")
+string manualCorrelation = input.string("AUTO", "Correlation Status", options=["AUTO", "OK", "CONFLICT"], group="Calculator: Adjustments")
+string manualSession = input.string("AUTO", "Session Override", options=["AUTO", "PRIME", "ACCEPTABLE", "WEAK"], group="Calculator: Adjustments")
+
+// ============================================================================
+// CALCULATIONS: RISK MANAGEMENT
+// ============================================================================
+
+// FIXED: Time calculations with CET timezone
+currentHour = hour(time, "Europe/Berlin")
+currentMinute = minute(time, "Europe/Berlin")
+currentDay = dayofweek(time, "Europe/Berlin")
+
+currentTimeMinutes = currentHour * 60 + currentMinute
+tradingStartMinutes = tradingStartHour * 60 + tradingStartMinute
+tradingEndMinutes = tradingEndHour * 60 + tradingEndMinute
+fridayCloseMinutes = fridayCloseHour * 60 + fridayCloseMinute
+fridayBlockMinutes = fridayBlockHour * 60 + fridayBlockMinute
+
+isFriday = currentDay == 6
+effectiveCloseMinutes = isFriday ? fridayCloseMinutes : tradingEndMinutes
+minutesUntilClose = effectiveCloseMinutes - currentTimeMinutes
+hoursUntilClose = math.floor(minutesUntilClose / 60)
+minutesRemaining = minutesUntilClose % 60
+minutesUntilFridayClose = isFriday ? fridayCloseMinutes - currentTimeMinutes : 9999
+
+// P&L calculations (4-tier system)
+totalPnL = currentDayPnL + openPositionPnL
+bufferRemaining = pnlStop - totalPnL
+pnlStatus = totalPnL >= pnlSafe ? "SAFE" : totalPnL >= pnlCaution ? "CAUTION" : totalPnL >= pnlWarning ? "WARNING" : "DANGER"
+pnlColor = totalPnL >= pnlSafe ? color.new(color.green, 0) : totalPnL >= pnlCaution ? color.new(color.yellow, 0) : totalPnL >= pnlWarning ? color.new(color.orange, 0) : color.new(color.red, 0)
+tradingBlockedPnL = totalPnL <= pnlStop
+
+// Position status
+positionsAtMax = currentPositions >= maxPositions
+positionColor = currentPositions == 0 ? color.new(color.gray, 0) : positionsAtMax ? color.new(color.red, 0) : color.new(color.green, 0)
+
+// Time status
+isInTradingHours = currentTimeMinutes >= tradingStartMinutes and currentTimeMinutes < effectiveCloseMinutes
+timeStatus = not isInTradingHours ? "CLOSED" : "OPEN"
+countdownColor = minutesUntilClose > 120 ? color.new(color.green, 0) : minutesUntilClose > 60 ? color.new(color.yellow, 0) : minutesUntilClose > 30 ? color.new(color.orange, 0) : color.new(color.red, 0)
+timeColor = not isInTradingHours ? color.new(color.red, 0) : color.new(color.green, 0)
+
+// Friday status
+fridayStatus = not isFriday ? "NOT FRIDAY" : minutesUntilFridayClose <= 5 ? "FORCE EXIT" : minutesUntilFridayClose <= 10 ? "EXIT NOW" : minutesUntilFridayClose <= 15 ? "15 MIN" : minutesUntilFridayClose <= 30 ? "30 MIN" : currentTimeMinutes >= fridayBlockMinutes ? "NO ENTRIES" : "NORMAL"
+fridayColor = not isFriday ? color.new(color.gray, 0) : minutesUntilFridayClose <= 5 ? color.new(color.red, 0) : minutesUntilFridayClose <= 15 ? color.new(color.red, 0) : minutesUntilFridayClose <= 30 ? color.new(color.orange, 0) : currentTimeMinutes >= fridayBlockMinutes ? color.new(color.orange, 0) : color.new(color.green, 0)
+
+// Overall trading permission
+tradingBlocked = tradingBlockedPnL or not isInTradingHours
+blockReason = tradingBlockedPnL ? "HARD STOP HIT" : not isInTradingHours ? "OUTSIDE HOURS" : ""
+
+// ============================================================================
+// CALCULATIONS: KO VALIDATOR
+// ============================================================================
+
+atrValue = ta.atr(14)
+stopDistance = math.abs(koEntry - koStop)
+koDistance = koDirection == "LONG" ? math.abs(koEntry - koKOLevel) : math.abs(koKOLevel - koEntry)
+koDistanceATR = stopDistance > 0 ? koDistance / stopDistance : 0
+koMinRequired = 2.0
+koIsValid = koDistanceATR >= koMinRequired
+koStatus = not koHasSetup ? "NO SETUP" : koIsValid ? "VALID" : "UNSAFE"
+koStatusColor = not koHasSetup ? color.new(color.gray, 0) : koIsValid ? color.new(color.green, 0) : color.new(color.red, 0)
+
+// ============================================================================
+// CALCULATIONS: POSITION CALCULATOR
+// ============================================================================
+
+// Volatility regime detection
+atrCurrent = ta.atr(14)
+atr50 = ta.atr(14)[50]
+atrHigh = atrCurrent > atr50 * 1.5
+atrLow = atrCurrent < atr50 * 0.7
+detectedRegime = atrHigh ? "HIGH" : atrLow ? "LOW" : "NORMAL"
+activeRegime = manualRegime == "AUTO" ? detectedRegime : manualRegime
+
+// Session detection
+isPrimeTime = currentTimeMinutes >= 870 and currentTimeMinutes < 1050
+isAcceptableTime = (currentTimeMinutes >= 540 and currentTimeMinutes < 870) or (currentTimeMinutes >= 1050 and currentTimeMinutes < 1140)
+detectedSession = isPrimeTime ? "PRIME" : isAcceptableTime ? "ACCEPTABLE" : "WEAK"
+activeSession = manualSession == "AUTO" ? sessionStrength : manualSession
+
+// Correlation
+activeCorrelation = manualCorrelation == "AUTO" ? "OK" : manualCorrelation
+
+// Position size calculation
+regimeMultiplier = activeRegime == "HIGH" ? 0.5 : activeRegime == "LOW" ? 1.0 : 1.0
+correlationMultiplier = activeCorrelation == "CONFLICT" ? 0.5 : 1.0
+sessionMultiplier = activeSession == "PRIME" ? 1.0 : activeSession == "ACCEPTABLE" ? 0.75 : 0.5
+finalRiskAmount = baseRisk * regimeMultiplier * correlationMultiplier * sessionMultiplier
+stopDistancePips = stopATR * atrValue
+positionSizeBase = finalRiskAmount / stopDistancePips
+effectiveLeverage = leverage * 1.0
+
+calcStatus = finalRiskAmount == baseRisk ? "NORMAL" : finalRiskAmount < baseRisk ? "REDUCED" : "ERROR"
+calcStatusColor = calcStatus == "NORMAL" ? color.new(color.green, 0) : calcStatus == "REDUCED" ? color.new(color.orange, 0) : color.new(color.red, 0)
+
+// ============================================================================
+// MAIN DASHBOARD TABLE
+// ============================================================================
+
+getTablePosition(pos) => pos == "top_left" ? position.top_left : pos == "top_center" ? position.top_center : pos == "top_right" ? position.top_right : pos == "middle_left" ? position.middle_left : pos == "middle_center" ? position.middle_center : pos == "middle_right" ? position.middle_right : pos == "bottom_left" ? position.bottom_left : pos == "bottom_center" ? position.bottom_center : position.bottom_right
+
+getTextSize(sizeStr) => sizeStr == "tiny" ? size.tiny : sizeStr == "small" ? size.small : sizeStr == "large" ? size.large : size.normal
+
+var table mainTable = table.new(position=position.top_left, columns=2, rows=35, bgcolor=color.new(color.black, 10), border_width=2, border_color=color.new(#FFD54F, 0), frame_width=2, frame_color=color.new(#FFD54F, 0))
+
+if barstate.islast
+    table.clear(mainTable, 0, 0, 1, 34)
+    
+    mainTable := table.new(getTablePosition(mainTablePos), 2, 35, bgcolor=color.new(color.black, 10), border_width=2, border_color=color.new(#FFD54F, 0), frame_width=2, frame_color=color.new(#FFD54F, 0))
+    
+    textSize = getTextSize(mainTableSize)
+    rowOffset = 0
+    
+    // ========== TRADING BLOCKED WARNING ==========
+    if tradingBlocked
+        table.cell(mainTable, 0, rowOffset, "TRADING BLOCKED", text_color=color.new(color.white, 0), bgcolor=color.new(color.red, 0), text_size=size.large, text_halign=text.align_center)
+        table.cell(mainTable, 1, rowOffset, "", bgcolor=color.new(color.red, 0))
+        rowOffset += 1
+        table.cell(mainTable, 0, rowOffset, "Reason:", text_color=color.new(#FFCC00, 0), bgcolor=color.new(color.black, 30), text_size=textSize)
+        table.cell(mainTable, 1, rowOffset, blockReason, text_color=color.new(color.white, 0), bgcolor=color.new(color.red, 0), text_size=textSize, text_halign=text.align_right)
+        rowOffset += 1
+    
+    // ========== HEADER ==========
+    table.cell(mainTable, 0, rowOffset, "RISK+POSITION", text_color=color.new(#FFD54F, 0), bgcolor=color.new(color.black, 30), text_size=size.large, text_halign=text.align_center)
+    table.cell(mainTable, 1, rowOffset, "", bgcolor=color.new(color.black, 30))
+    rowOffset += 1
+    
+    // ========== SECTION: DAILY P&L ==========
+    table.cell(mainTable, 0, rowOffset, "Daily P&L:", text_color=color.new(#FFD54F, 0), bgcolor=color.new(color.black, 30), text_size=textSize)
+    table.cell(mainTable, 1, rowOffset, str.tostring(totalPnL, "#.00") + " EUR", text_color=color.new(color.white, 0), bgcolor=pnlColor, text_size=textSize, text_halign=text.align_right)
+    rowOffset += 1
+    
+    table.cell(mainTable, 0, rowOffset, "  Status:", text_color=color.new(#CCCCCC, 0), bgcolor=color.new(color.black, 30), text_size=textSize)
+    table.cell(mainTable, 1, rowOffset, pnlStatus, text_color=color.new(color.white, 0), bgcolor=pnlColor, text_size=textSize, text_halign=text.align_right)
+    rowOffset += 1
+    
+    if totalPnL < pnlSafe
+        table.cell(mainTable, 0, rowOffset, "  Buffer:", text_color=color.new(#CCCCCC, 0), bgcolor=color.new(color.black, 30), text_size=textSize)
+        table.cell(mainTable, 1, rowOffset, str.tostring(bufferRemaining, "#.00") + " EUR", text_color=color.new(color.white, 0), bgcolor=color.new(color.black, 30), text_size=textSize, text_halign=text.align_right)
+        rowOffset += 1
+    
+    table.cell(mainTable, 0, rowOffset, "  Hard Stop:", text_color=color.new(#CCCCCC, 0), bgcolor=color.new(color.black, 30), text_size=textSize)
+    table.cell(mainTable, 1, rowOffset, str.tostring(pnlStop, "#.00") + " EUR", text_color=color.new(color.white, 0), bgcolor=color.new(color.red, 0), text_size=textSize, text_halign=text.align_right)
+    rowOffset += 1
+    
+    // ========== SECTION: POSITIONS ==========
+    table.cell(mainTable, 0, rowOffset, "Positions:", text_color=color.new(#FFD54F, 0), bgcolor=color.new(color.black, 30), text_size=textSize)
+    posText = str.tostring(currentPositions) + " / " + str.tostring(maxPositions)
+    table.cell(mainTable, 1, rowOffset, posText, text_color=color.new(color.white, 0), bgcolor=positionColor, text_size=textSize, text_halign=text.align_right)
+    rowOffset += 1
+    
+    if pos1Direction != "NONE" and pos1Symbol != ""
+        table.cell(mainTable, 0, rowOffset, "  " + pos1Symbol + " " + pos1Direction, text_color=color.new(#CCCCCC, 0), bgcolor=color.new(color.black, 30), text_size=textSize)
+        table.cell(mainTable, 1, rowOffset, str.tostring(pos1PnL, "#.00") + " EUR", text_color=pos1PnL >= 0 ? color.new(color.green, 0) : color.new(color.red, 0), bgcolor=color.new(color.black, 30), text_size=textSize, text_halign=text.align_right)
+        rowOffset += 1
+    
+    if pos2Direction != "NONE" and pos2Symbol != ""
+        table.cell(mainTable, 0, rowOffset, "  " + pos2Symbol + " " + pos2Direction, text_color=color.new(#CCCCCC, 0), bgcolor=color.new(color.black, 30), text_size=textSize)
+        table.cell(mainTable, 1, rowOffset, str.tostring(pos2PnL, "#.00") + " EUR", text_color=pos2PnL >= 0 ? color.new(color.green, 0) : color.new(color.red, 0), bgcolor=color.new(color.black, 30), text_size=textSize, text_halign=text.align_right)
+        rowOffset += 1
+    
+    // ========== SECTION: TIME ==========
+    table.cell(mainTable, 0, rowOffset, "Time Status:", text_color=color.new(#FFD54F, 0), bgcolor=color.new(color.black, 30), text_size=textSize)
+    table.cell(mainTable, 1, rowOffset, timeStatus, text_color=color.new(color.white, 0), bgcolor=timeColor, text_size=textSize, text_halign=text.align_right)
+    rowOffset += 1
+    
+    currentTimeStr = str.format("{0,number,00}:{1,number,00}", currentHour, currentMinute)
+    table.cell(mainTable, 0, rowOffset, "  Current:", text_color=color.new(#CCCCCC, 0), bgcolor=color.new(color.black, 30), text_size=textSize)
+    table.cell(mainTable, 1, rowOffset, currentTimeStr + " CET", text_color=color.new(#CCCCCC, 0), bgcolor=color.new(color.black, 30), text_size=textSize, text_halign=text.align_right)
+    rowOffset += 1
+    
+    if isInTradingHours and minutesUntilClose > 0
+        countdownText = str.tostring(hoursUntilClose) + "h " + str.format("{0,number,00}m", minutesRemaining)
+        table.cell(mainTable, 0, rowOffset, "  Until Close:", text_color=color.new(#CCCCCC, 0), bgcolor=color.new(color.black, 30), text_size=textSize)
+        table.cell(mainTable, 1, rowOffset, countdownText, text_color=color.new(color.white, 0), bgcolor=countdownColor, text_size=textSize, text_halign=text.align_right)
+        rowOffset += 1
+    
+    tradingHoursStr = str.format("{0,number,00}:{1,number,00}-{2,number,00}:{3,number,00}", tradingStartHour, tradingStartMinute, isFriday ? fridayCloseHour : tradingEndHour, isFriday ? fridayCloseMinute : tradingEndMinute)
+    table.cell(mainTable, 0, rowOffset, "  Hours:", text_color=color.new(#CCCCCC, 0), bgcolor=color.new(color.black, 30), text_size=textSize)
+    table.cell(mainTable, 1, rowOffset, tradingHoursStr, text_color=color.new(#CCCCCC, 0), bgcolor=color.new(color.black, 30), text_size=textSize, text_halign=text.align_right)
+    rowOffset += 1
+    
+    // ========== SECTION: FRIDAY ==========
+    if isFriday
+        table.cell(mainTable, 0, rowOffset, "Friday:", text_color=color.new(#FFD54F, 0), bgcolor=color.new(color.black, 30), text_size=textSize)
+        table.cell(mainTable, 1, rowOffset, fridayStatus, text_color=color.new(color.white, 0), bgcolor=fridayColor, text_size=textSize, text_halign=text.align_right)
+        rowOffset += 1
+        
+        if minutesUntilFridayClose <= 60
+            table.cell(mainTable, 0, rowOffset, "  Close In:", text_color=color.new(#CCCCCC, 0), bgcolor=color.new(color.black, 30), text_size=textSize)
+            table.cell(mainTable, 1, rowOffset, str.tostring(minutesUntilFridayClose) + " min", text_color=color.new(color.white, 0), bgcolor=fridayColor, text_size=textSize, text_halign=text.align_right)
+            rowOffset += 1
+        
+        fridayCloseStr = str.format("{0,number,00}:{1,number,00}", fridayCloseHour, fridayCloseMinute)
+        table.cell(mainTable, 0, rowOffset, "  Close Time:", text_color=color.new(#CCCCCC, 0), bgcolor=color.new(color.black, 30), text_size=textSize)
+        table.cell(mainTable, 1, rowOffset, fridayCloseStr + " CET", text_color=color.new(#CCCCCC, 0), bgcolor=color.new(color.black, 30), text_size=textSize, text_halign=text.align_right)
+        rowOffset += 1
+    
+    // ========== SECTION: SESSION ==========
+    table.cell(mainTable, 0, rowOffset, "Session:", text_color=color.new(#FFD54F, 0), bgcolor=color.new(color.black, 30), text_size=textSize)
+    sessionColor = sessionStrength == "PRIME" ? color.new(color.green, 0) : sessionStrength == "ACCEPTABLE" ? color.new(color.yellow, 0) : color.new(color.orange, 0)
+    table.cell(mainTable, 1, rowOffset, sessionStrength, text_color=color.new(color.white, 0), bgcolor=sessionColor, text_size=textSize, text_halign=text.align_right)
+    rowOffset += 1
+    
+    table.cell(mainTable, 0, rowOffset, "  Max Size:", text_color=color.new(#CCCCCC, 0), bgcolor=color.new(color.black, 30), text_size=textSize)
+    table.cell(mainTable, 1, rowOffset, str.tostring(sessionMaxSize, "#") + " EUR", text_color=color.new(#CCCCCC, 0), bgcolor=color.new(color.black, 30), text_size=textSize, text_halign=text.align_right)
+    rowOffset += 1
+    
+    // ========== SECTION: KO VALIDATOR ==========
+    if showKOValidator
+        table.cell(mainTable, 0, rowOffset, "-------------------", text_color=color.new(#666666, 0), bgcolor=color.new(color.black, 30), text_size=textSize, text_halign=text.align_center)
+        table.cell(mainTable, 1, rowOffset, "-------------------", text_color=color.new(#666666, 0), bgcolor=color.new(color.black, 30), text_size=textSize, text_halign=text.align_center)
+        rowOffset += 1
+        
+        table.cell(mainTable, 0, rowOffset, "KO SAFETY:", text_color=color.new(#FFD54F, 0), bgcolor=color.new(color.black, 30), text_size=textSize)
+        table.cell(mainTable, 1, rowOffset, koStatus, text_color=color.new(color.white, 0), bgcolor=koStatusColor, text_size=textSize, text_halign=text.align_right)
+        rowOffset += 1
+        
+        if koHasSetup
+            table.cell(mainTable, 0, rowOffset, "  KO Distance:", text_color=color.new(#CCCCCC, 0), bgcolor=color.new(color.black, 30), text_size=textSize)
+            table.cell(mainTable, 1, rowOffset, str.tostring(koDistanceATR, "#.##") + "x Stop", text_color=color.new(#CCCCCC, 0), bgcolor=color.new(color.black, 30), text_size=textSize, text_halign=text.align_right)
+            rowOffset += 1
+            
+            table.cell(mainTable, 0, rowOffset, "  Required:", text_color=color.new(#CCCCCC, 0), bgcolor=color.new(color.black, 30), text_size=textSize)
+            table.cell(mainTable, 1, rowOffset, str.tostring(koMinRequired, "#.#") + "x Stop", text_color=color.new(#CCCCCC, 0), bgcolor=color.new(color.black, 30), text_size=textSize, text_halign=text.align_right)
+            rowOffset += 1
+            
+            table.cell(mainTable, 0, rowOffset, "  Direction:", text_color=color.new(#CCCCCC, 0), bgcolor=color.new(color.black, 30), text_size=textSize)
+            table.cell(mainTable, 1, rowOffset, koDirection, text_color=color.new(#CCCCCC, 0), bgcolor=color.new(color.black, 30), text_size=textSize, text_halign=text.align_right)
+            rowOffset += 1
+        else
+            table.cell(mainTable, 0, rowOffset, "  Set Direction, Entry, Stop, KO", text_color=color.new(#CCCCCC, 0), bgcolor=color.new(color.black, 30), text_size=textSize)
+            table.cell(mainTable, 1, rowOffset, "", bgcolor=color.new(color.black, 30))
+            rowOffset += 1
+    
+    // ========== SECTION: POSITION CALCULATOR ==========
+    if showPosCalculator
+        table.cell(mainTable, 0, rowOffset, "-------------------", text_color=color.new(#666666, 0), bgcolor=color.new(color.black, 30), text_size=textSize, text_halign=text.align_center)
+        table.cell(mainTable, 1, rowOffset, "-------------------", text_color=color.new(#666666, 0), bgcolor=color.new(color.black, 30), text_size=textSize, text_halign=text.align_center)
+        rowOffset += 1
+        
+        table.cell(mainTable, 0, rowOffset, "POSITION SIZE:", text_color=color.new(#FFD54F, 0), bgcolor=color.new(color.black, 30), text_size=textSize)
+        table.cell(mainTable, 1, rowOffset, calcStatus, text_color=color.new(color.white, 0), bgcolor=calcStatusColor, text_size=textSize, text_halign=text.align_right)
+        rowOffset += 1
+        
+        table.cell(mainTable, 0, rowOffset, "  Regime:", text_color=color.new(#CCCCCC, 0), bgcolor=color.new(color.black, 30), text_size=textSize)
+        regimeColor = activeRegime == "HIGH" ? color.new(color.red, 0) : activeRegime == "LOW" ? color.new(color.blue, 0) : color.new(color.green, 0)
+        table.cell(mainTable, 1, rowOffset, activeRegime, text_color=color.new(color.white, 0), bgcolor=regimeColor, text_size=textSize, text_halign=text.align_right)
+        rowOffset += 1
+        
+        table.cell(mainTable, 0, rowOffset, "  Correlation:", text_color=color.new(#CCCCCC, 0), bgcolor=color.new(color.black, 30), text_size=textSize)
+        corrColor = activeCorrelation == "CONFLICT" ? color.new(color.red, 0) : color.new(color.green, 0)
+        table.cell(mainTable, 1, rowOffset, activeCorrelation, text_color=color.new(color.white, 0), bgcolor=corrColor, text_size=textSize, text_halign=text.align_right)
+        rowOffset += 1
+        
+        table.cell(mainTable, 0, rowOffset, "  Session:", text_color=color.new(#CCCCCC, 0), bgcolor=color.new(color.black, 30), text_size=textSize)
+        sessColor = activeSession == "PRIME" ? color.new(color.green, 0) : activeSession == "ACCEPTABLE" ? color.new(color.yellow, 0) : color.new(color.orange, 0)
+        table.cell(mainTable, 1, rowOffset, activeSession, text_color=color.new(color.white, 0), bgcolor=sessColor, text_size=textSize, text_halign=text.align_right)
+        rowOffset += 1
+        
+        table.cell(mainTable, 0, rowOffset, "  ATR:", text_color=color.new(#CCCCCC, 0), bgcolor=color.new(color.black, 30), text_size=textSize)
+        table.cell(mainTable, 1, rowOffset, str.tostring(atrValue, "#.00000"), text_color=color.new(#CCCCCC, 0), bgcolor=color.new(color.black, 30), text_size=textSize, text_halign=text.align_right)
+        rowOffset += 1
+        
+        table.cell(mainTable, 0, rowOffset, "  Base Risk:", text_color=color.new(#CCCCCC, 0), bgcolor=color.new(color.black, 30), text_size=textSize)
+        table.cell(mainTable, 1, rowOffset, str.tostring(baseRisk) + " EUR", text_color=color.new(#CCCCCC, 0), bgcolor=color.new(color.black, 30), text_size=textSize, text_halign=text.align_right)
+        rowOffset += 1
+        
+        table.cell(mainTable, 0, rowOffset, "  Stop Distance:", text_color=color.new(#CCCCCC, 0), bgcolor=color.new(color.black, 30), text_size=textSize)
+        table.cell(mainTable, 1, rowOffset, str.tostring(stopATR) + " ATR", text_color=color.new(#CCCCCC, 0), bgcolor=color.new(color.black, 30), text_size=textSize, text_halign=text.align_right)
+        rowOffset += 1
+        
+        table.cell(mainTable, 0, rowOffset, "  Final Risk:", text_color=color.new(#CCCCCC, 0), bgcolor=color.new(color.black, 30), text_size=textSize)
+        finalRiskColor = finalRiskAmount < baseRisk ? color.new(color.orange, 0) : color.new(color.green, 0)
+        table.cell(mainTable, 1, rowOffset, str.tostring(finalRiskAmount, "#") + " EUR", text_color=color.new(color.white, 0), bgcolor=finalRiskColor, text_size=textSize, text_halign=text.align_right)
+        rowOffset += 1
+        
+        table.cell(mainTable, 0, rowOffset, "  Stop (Pips):", text_color=color.new(#CCCCCC, 0), bgcolor=color.new(color.black, 30), text_size=textSize)
+        table.cell(mainTable, 1, rowOffset, str.tostring(stopDistancePips, "#.0000"), text_color=color.new(#CCCCCC, 0), bgcolor=color.new(color.black, 30), text_size=textSize, text_halign=text.align_right)
+
+// ============================================================================
+// ALERTS
+// ============================================================================
+
+alertcondition(totalPnL <= pnlSafe and totalPnL > pnlCaution, "CAUTION", "P&L entered CAUTION zone")
+alertcondition(totalPnL <= pnlCaution and totalPnL > pnlWarning, "WARNING", "P&L entered WARNING zone")
+alertcondition(totalPnL <= pnlWarning and totalPnL > pnlStop, "DANGER", "P&L entered DANGER zone")
+alertcondition(totalPnL <= pnlStop, "HARD STOP", "Trading BLOCKED - Hard stop hit")
+alertcondition(currentPositions >= maxPositions, "Max Positions", "Maximum positions reached")
+alertcondition(isInTradingHours and minutesUntilClose <= 60 and minutesUntilClose > 55, "1h to Close", "1 hour until session close")
+alertcondition(isInTradingHours and minutesUntilClose <= 30 and minutesUntilClose > 25, "30min to Close", "30 minutes to close")
+alertcondition(isFriday and minutesUntilFridayClose <= 30 and minutesUntilFridayClose > 25, "Friday 30min", "Friday close in 30 minutes")
+alertcondition(isFriday and minutesUntilFridayClose <= 10 and minutesUntilFridayClose > 8, "Friday EXIT", "EXIT ALL - 10 minutes to Friday close")
+alertcondition(koHasSetup and not koIsValid, "KO UNSAFE", "KO distance below 2.0x stop - UNSAFE")
+
+// ============================================================================
+// END OF INDICATOR - v1.1 FIXED
+// ============================================================================
