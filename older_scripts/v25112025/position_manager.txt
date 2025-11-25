@@ -1,0 +1,970 @@
+//@version=6
+indicator("KO Position Manager v2.3.0", overlay=false, precision=2)
+
+// ============================================================================
+// KO POSITION MANAGER - PATTERN-AWARE POSITION PLANNING & TRACKING
+// ============================================================================
+// Version: 2.3.0
+// Date: November 22, 2025
+// Purpose: Pattern detection integration with invalidation buffer calculations
+//
+// NEW in v2.3.0 (PATTERN INTEGRATION):
+// - ADDED: Pattern detection from 1H data (EPL/EPS/CBRL/CBRS)
+// - ADDED: Critical level calculation (pattern invalidation points)
+// - ADDED: Certificate value at pattern invalidation
+// - ADDED: EUR risk if using pattern-aligned stops
+// - ADDED: Visual pattern stop lines on certificate chart
+// - ADDED: Critical level line on underlying chart
+// - ADDED: Pattern section in table (rows 18-22)
+// - ADDED: Toggle for ATR vs Pattern-based stops
+// - ADDED: Buffer rating display (STRONG/MODERATE/WEAK/FRAGILE)
+//
+// All v2.2.0 features retained:
+// - Two-mode system (Estimate vs Real)
+// - Certificate registry integration
+// - Framework 2.2.0 risk management
+// - ATR regime detection
+// - Position sizing (~€100 risk)
+// - Active/Inactive tracking with time limits
+// - Comprehensive table with all metrics
+// ============================================================================
+
+// ============================================================================
+// CERTIFICATE MODE SELECTION (TOP PRIORITY)
+// ============================================================================
+group_mode = "Certificate Mode"
+certificateMode = input.string("Estimate", "Certificate Mode", options=["Estimate", "Real"], group=group_mode, tooltip="ESTIMATE: Auto-detect + registry defaults | REAL: Manual inputs + entry zones")
+
+// ============================================================================
+// ESTIMATE MODE SETTINGS (Only active when mode = Estimate)
+// ============================================================================
+group_estimate = "Estimate Mode Settings"
+direction = input.string("Long", "Direction", options=["Long", "Short"], group=group_estimate, tooltip="Select certificate direction for auto-detected instrument")
+
+// ============================================================================
+// REAL MODE SETTINGS (Only active when mode = Real)
+// ============================================================================
+group_real = "Real Mode Settings"
+selectedCert = input.string("EUR/USD Long", "Certificate", options=["EUR/USD Long", "EUR/USD Short", "EUR/JPY Long", "EUR/JPY Short", "EUR/CHF Long", "EUR/CHF Short", "EUR/GBP Long", "EUR/GBP Short", "EUR/CAD Long", "EUR/CAD Short", "USD/JPY Long", "USD/JPY Short", "GBP/USD Long", "GBP/USD Short", "USD/CAD Long", "USD/CAD Short", "USD/CHF Long", "USD/CHF Short", "AUD/USD Long", "AUD/USD Short", "Gold Long", "Gold Short", "Silver FX Long", "Silver FX Short", "Copper Long", "Copper Short", "Silver CC Long", "Silver CC Short", "S&P 500 Long", "S&P 500 Short", "NASDAQ Long", "NASDAQ Short", "US30 Long", "US30 Short", "DAX40 Long", "DAX40 Short"], group=group_real, tooltip="Only used in REAL mode")
+manualStrike = input.float(1.1033, "Strike/KO Price", group=group_real, tooltip="Only used in REAL mode - enter exact value from KID")
+manualRatio = input.float(100.00, "Ratio", group=group_real, tooltip="Only used in REAL mode - enter exact value from KID")
+
+// ============================================================================
+// PATTERN-BASED STOP SETTINGS (NEW)
+// ============================================================================
+group_pattern = "Pattern-Based Stop Settings"
+usePatternStop = input.bool(false, "Use Pattern Stop (vs ATR Stop)", group=group_pattern, tooltip="When enabled, uses pattern invalidation level as stop loss instead of ATR-based stop")
+showPatternLines = input.bool(true, "Show Pattern Stop Lines", group=group_pattern, tooltip="Display pattern invalidation levels on charts")
+patternLineStyle = input.string("Dashed", "Pattern Line Style", options=["Solid", "Dashed", "Dotted"], group=group_pattern)
+
+// ============================================================================
+// AUTO-DETECTION LOGIC
+// ============================================================================
+getInstrumentFromChart() =>
+    string ticker = syminfo.ticker
+    string detected = "UNKNOWN"
+    
+    // FOREX - EUR pairs
+    if str.contains(ticker, "EURUSD")
+        detected := "EUR/USD"
+    else if str.contains(ticker, "EURJPY")
+        detected := "EUR/JPY"
+    else if str.contains(ticker, "EURCHF")
+        detected := "EUR/CHF"
+    else if str.contains(ticker, "EURGBP")
+        detected := "EUR/GBP"
+    else if str.contains(ticker, "EURCAD")
+        detected := "EUR/CAD"
+    
+    // FOREX - USD pairs
+    else if str.contains(ticker, "USDJPY")
+        detected := "USD/JPY"
+    else if str.contains(ticker, "GBPUSD")
+        detected := "GBP/USD"
+    else if str.contains(ticker, "USDCAD")
+        detected := "USD/CAD"
+    else if str.contains(ticker, "USDCHF")
+        detected := "USD/CHF"
+    else if str.contains(ticker, "AUDUSD")
+        detected := "AUD/USD"
+    
+    // COMMODITIES
+    else if str.contains(ticker, "XAU") or str.contains(ticker, "GOLD")
+        detected := "Gold"
+    else if str.contains(ticker, "XAG") or str.contains(ticker, "SILVER")
+        detected := "Silver FX"
+    else if str.contains(ticker, "COPPER")
+        detected := "Copper"
+    
+    // INDICES
+    else if str.contains(ticker, "SPX") or str.contains(ticker, "SP500")
+        detected := "S&P 500"
+    else if str.contains(ticker, "NAS") or str.contains(ticker, "NASDAQ")
+        detected := "NASDAQ"
+    else if str.contains(ticker, "US30") or str.contains(ticker, "DOW")
+        detected := "US30"
+    else if str.contains(ticker, "DAX") or str.contains(ticker, "DE30")
+        detected := "DAX40"
+    
+    detected
+
+detectedInstrument = getInstrumentFromChart()
+
+// ============================================================================
+// CERTIFICATE REGISTRY (Hardcoded from CSV - Nov 17, 2025)
+// ============================================================================
+var float registryStrike = na
+var float registryRatio = na
+
+if certificateMode == "Estimate"
+    // FOREX - EUR/USD
+    if detectedInstrument == "EUR/USD" and direction == "Long"
+        registryStrike := 1.1033
+        registryRatio := 100.00
+    else if detectedInstrument == "EUR/USD" and direction == "Short"
+        registryStrike := 1.2168
+        registryRatio := 100.00
+    
+    // FOREX - EUR/JPY
+    else if detectedInstrument == "EUR/JPY" and direction == "Long"
+        registryStrike := 170.8259
+        registryRatio := 100.00
+    else if detectedInstrument == "EUR/JPY" and direction == "Short"
+        registryStrike := 188.8068
+        registryRatio := 100.00
+    
+    // FOREX - EUR/CHF
+    else if detectedInstrument == "EUR/CHF" and direction == "Long"
+        registryStrike := 0.877466
+        registryRatio := 0.01
+    else if detectedInstrument == "EUR/CHF" and direction == "Short"
+        registryStrike := 0.965966
+        registryRatio := 0.01
+    
+    // FOREX - EUR/GBP
+    else if detectedInstrument == "EUR/GBP" and direction == "Long"
+        registryStrike := 0.8368
+        registryRatio := 100.00
+    else if detectedInstrument == "EUR/GBP" and direction == "Short"
+        registryStrike := 0.913156
+        registryRatio := 0.01
+    
+    // FOREX - EUR/CAD
+    else if detectedInstrument == "EUR/CAD" and direction == "Long"
+        registryStrike := 1.550957
+        registryRatio := 0.01
+    else if detectedInstrument == "EUR/CAD" and direction == "Short"
+        registryStrike := 1.703805
+        registryRatio := 0.01
+    
+    // FOREX - USD/JPY
+    else if detectedInstrument == "USD/JPY" and direction == "Long"
+        registryStrike := 148.839911
+        registryRatio := 0.01
+    else if detectedInstrument == "USD/JPY" and direction == "Short"
+        registryStrike := 160.504270
+        registryRatio := 0.01
+    
+    // FOREX - GBP/USD
+    else if detectedInstrument == "GBP/USD" and direction == "Long"
+        registryStrike := 1.252782
+        registryRatio := 0.01
+    else if detectedInstrument == "GBP/USD" and direction == "Short"
+        registryStrike := 1.364547
+        registryRatio := 0.01
+    
+    // FOREX - USD/CAD
+    else if detectedInstrument == "USD/CAD" and direction == "Long"
+        registryStrike := 1.332025
+        registryRatio := 0.01
+    else if detectedInstrument == "USD/CAD" and direction == "Short"
+        registryStrike := 1.475323
+        registryRatio := 0.01
+    
+    // FOREX - USD/CHF
+    else if detectedInstrument == "USD/CHF" and direction == "Long"
+        registryStrike := 0.764374
+        registryRatio := 0.01
+    else if detectedInstrument == "USD/CHF" and direction == "Short"
+        registryStrike := 0.838035
+        registryRatio := 0.01
+    
+    // FOREX - AUD/USD
+    else if detectedInstrument == "AUD/USD" and direction == "Long"
+        registryStrike := 0.623292
+        registryRatio := 0.01
+    else if detectedInstrument == "AUD/USD" and direction == "Short"
+        registryStrike := 0.673948
+        registryRatio := 0.01
+    
+    // COMMODITIES - Gold
+    else if detectedInstrument == "Gold" and direction == "Long"
+        registryStrike := 3877.3875
+        registryRatio := 0.10
+    else if detectedInstrument == "Gold" and direction == "Short"
+        registryStrike := 4275.3162
+        registryRatio := 0.10
+    
+    // COMMODITIES - Silver FX
+    else if (detectedInstrument == "Silver FX" or detectedInstrument == "Silver CC") and direction == "Long"
+        registryStrike := 48.4957
+        registryRatio := 1.00
+    else if (detectedInstrument == "Silver FX" or detectedInstrument == "Silver CC") and direction == "Short"
+        registryStrike := 53.0844
+        registryRatio := 0.10
+    
+    // COMMODITIES - Copper
+    else if detectedInstrument == "Copper" and direction == "Long"
+        registryStrike := 4.778
+        registryRatio := 10.00
+    else if detectedInstrument == "Copper" and direction == "Short"
+        registryStrike := 5.242
+        registryRatio := 10.00
+    
+    // INDICES - S&P 500
+    else if detectedInstrument == "S&P 500" and direction == "Long"
+        registryStrike := 6416.4601
+        registryRatio := 0.01
+    else if detectedInstrument == "S&P 500" and direction == "Short"
+        registryStrike := 7080.9393
+        registryRatio := 0.01
+    
+    // INDICES - NASDAQ
+    else if detectedInstrument == "NASDAQ" and direction == "Long"
+        registryStrike := 23848.4438
+        registryRatio := 0.001
+    else if detectedInstrument == "NASDAQ" and direction == "Short"
+        registryStrike := 26420.9303
+        registryRatio := 0.01
+    
+    // INDICES - US30
+    else if detectedInstrument == "US30" and direction == "Long"
+        registryStrike := 44839.8851
+        registryRatio := 0.001
+    else if detectedInstrument == "US30" and direction == "Short"
+        registryStrike := 49387.4907
+        registryRatio := 0.01
+    
+    // INDICES - DAX40
+    else if detectedInstrument == "DAX40" and direction == "Long"
+        registryStrike := 22524.529
+        registryRatio := 0.001
+    else if detectedInstrument == "DAX40" and direction == "Short"
+        registryStrike := 24784.635
+        registryRatio := 0.01
+    
+    else
+        registryStrike := na
+        registryRatio := na
+
+// ============================================================================
+// FINAL PARAMETER SELECTION (Mode-dependent)
+// ============================================================================
+var float strikePrice = na
+var float multiplier = na
+var bool isLong = false
+var string activeCertName = na
+
+if certificateMode == "Estimate"
+    strikePrice := registryStrike
+    multiplier := registryRatio
+    isLong := direction == "Long"
+    activeCertName := detectedInstrument + " " + direction + " (Auto)"
+else
+    strikePrice := manualStrike
+    multiplier := manualRatio
+    isLong := str.contains(selectedCert, "Long")
+    activeCertName := selectedCert
+
+// ============================================================================
+// UNDERLYING SYMBOL MAPPING
+// ============================================================================
+getUnderlyingSymbol(string instrument) =>
+    var string symbol = ""
+    if instrument == "EUR/USD"
+        symbol := "OANDA:EURUSD"
+    else if instrument == "EUR/JPY"
+        symbol := "OANDA:EURJPY"
+    else if instrument == "EUR/CHF"
+        symbol := "OANDA:EURCHF"
+    else if instrument == "EUR/GBP"
+        symbol := "OANDA:EURGBP"
+    else if instrument == "EUR/CAD"
+        symbol := "OANDA:EURCAD"
+    else if instrument == "USD/JPY"
+        symbol := "OANDA:USDJPY"
+    else if instrument == "GBP/USD"
+        symbol := "OANDA:GBPUSD"
+    else if instrument == "USD/CAD"
+        symbol := "OANDA:USDCAD"
+    else if instrument == "USD/CHF"
+        symbol := "OANDA:USDCHF"
+    else if instrument == "AUD/USD"
+        symbol := "OANDA:AUDUSD"
+    else if instrument == "Gold"
+        symbol := "OANDA:XAUUSD"
+    else if instrument == "Silver FX" or instrument == "Silver CC"
+        symbol := "OANDA:XAGUSD"
+    else if instrument == "Copper"
+        symbol := "FX:COPPER"
+    else if instrument == "S&P 500"
+        symbol := "OANDA:SPX500USD"
+    else if instrument == "NASDAQ"
+        symbol := "OANDA:NAS100USD"
+    else if instrument == "US30"
+        symbol := "OANDA:US30USD"
+    else if instrument == "DAX40"
+        symbol := "OANDA:DE30EUR"
+    else
+        symbol := syminfo.tickerid
+    symbol
+
+underlyingSymbol = certificateMode == "Estimate" ? getUnderlyingSymbol(detectedInstrument) : getUnderlyingSymbol(str.replace_all(str.replace_all(selectedCert, " Long", ""), " Short", ""))
+
+// ============================================================================
+// PATTERN DETECTION FROM 1H (NEW SECTION)
+// ============================================================================
+
+// Fetch 1H data for pattern detection
+h1_close = request.security(syminfo.tickerid, "60", close, lookahead=barmerge.lookahead_off)
+h1_ema50 = request.security(syminfo.tickerid, "60", ta.ema(close, 50), lookahead=barmerge.lookahead_off)
+h1_ema100 = request.security(syminfo.tickerid, "60", ta.ema(close, 100), lookahead=barmerge.lookahead_off)
+h1_ema200 = request.security(syminfo.tickerid, "60", ta.ema(close, 200), lookahead=barmerge.lookahead_off)
+h1_atr = request.security(syminfo.tickerid, "60", ta.atr(14), lookahead=barmerge.lookahead_off)
+h1_high = request.security(syminfo.tickerid, "60", high, lookahead=barmerge.lookahead_off)
+h1_low = request.security(syminfo.tickerid, "60", low, lookahead=barmerge.lookahead_off)
+
+// Calculate ADX on 1H (for buffer calculations)
+[h1_diplus, h1_diminus, h1_adx] = request.security(syminfo.tickerid, "60", ta.dmi(14, 14), lookahead=barmerge.lookahead_off)
+
+// Macro trend determination
+h1_macro_trend = h1_close > h1_ema200 ? "BULL" : "BEAR"
+
+// Check if in pullback zone (50-100 EMA)
+h1_in_zone = (h1_close >= math.min(h1_ema50, h1_ema100) and h1_close <= math.max(h1_ema50, h1_ema100))
+
+// Pattern detection (simplified - focusing on EPL/EPS initially)
+var string activePattern = "NONE"
+if h1_in_zone
+    activePattern := h1_macro_trend == "BULL" ? "EPL" : "EPS"
+else
+    activePattern := "NONE"
+
+// ============================================================================
+// CRITICAL LEVEL CALCULATION (PATTERN INVALIDATION)
+// ============================================================================
+
+// Calculate distance buffers for pattern invalidation
+float buffer_macro_trend = na  // Distance to 200 EMA
+float buffer_zone_exit = na     // Distance to zone boundary
+float buffer_100ema = na        // Distance to 100 EMA
+
+// Critical level and source tracking
+float h1_critical_level = na
+string critical_source = ""
+
+if activePattern == "EPL"
+    // EPL: Measure distances BELOW price (bullish pattern fails on break below)
+    buffer_macro_trend := (h1_close - h1_ema200) / h1_atr
+    buffer_zone_exit := (h1_close - h1_ema100) / h1_atr  
+    buffer_100ema := (h1_close - h1_ema100) / h1_atr
+    
+    // Find minimum distance (weakest/closest level)
+    float min_buffer = buffer_macro_trend
+    h1_critical_level := h1_ema200
+    critical_source := "200 EMA"
+    
+    if buffer_zone_exit < min_buffer
+        min_buffer := buffer_zone_exit
+        h1_critical_level := h1_ema100
+        critical_source := "Zone Exit (100 EMA)"
+    
+else if activePattern == "EPS"
+    // EPS: Measure distances ABOVE price (bearish pattern fails on break above)
+    buffer_macro_trend := (h1_ema200 - h1_close) / h1_atr
+    buffer_zone_exit := (h1_ema100 - h1_close) / h1_atr
+    buffer_100ema := (h1_ema100 - h1_close) / h1_atr
+    
+    // Find minimum distance (weakest/closest level)
+    float min_buffer = buffer_macro_trend
+    h1_critical_level := h1_ema200
+    critical_source := "200 EMA"
+    
+    if buffer_zone_exit < min_buffer
+        min_buffer := buffer_zone_exit
+        h1_critical_level := h1_ema100
+        critical_source := "Zone Exit (100 EMA)"
+
+// Calculate buffer rating (for display purposes)
+string buffer_rating = "NONE"
+float min_distance_buffer = na
+if activePattern != "NONE"
+    min_distance_buffer := math.min(buffer_macro_trend, buffer_zone_exit)
+    buffer_rating := min_distance_buffer > 5.0 ? "STRONG" : min_distance_buffer > 3.0 ? "MODERATE" : min_distance_buffer > 2.0 ? "WEAK" : "FRAGILE"
+
+// ============================================================================
+// FRAMEWORK 2.2.0 RISK MANAGEMENT
+// ============================================================================
+group_risk = "Framework 2.2.0 Risk Management"
+enablePositionSizing = input.bool(true, "Enable Position Sizing", group=group_risk)
+riskAmount = input.float(100.0, "Risk Amount (EUR)", minval=1, step=10, group=group_risk, tooltip="€100 standard, €50 in RED regime")
+enableATRMonitoring = input.bool(true, "Enable ATR-Based KO Monitoring", group=group_risk)
+atrPeriod = input.int(14, "ATR Period", minval=1, maxval=100, group=group_risk)
+minKODistance = input.float(2.0, "Minimum KO Distance (× ATR)", minval=0.1, step=0.1, group=group_risk, tooltip="Framework requires ≥ 2.0× ATR")
+
+// ATR Regime Detection
+group_regime = "ATR Regime (Daily - Framework v2.2.0)"
+atrTimeframe = input.timeframe("D", "ATR Timeframe", group=group_regime, tooltip="Daily ATR per Framework v2.2.0 - DO NOT CHANGE")
+atrMultiplierGreen = input.float(1.2, "GREEN Regime (1.2× ATR)", minval=0.1, step=0.1, group=group_regime, tooltip="Normal volatility (20-80%) - Framework v2.2.0 standard")
+atrMultiplierYellow = input.float(0.8, "YELLOW Regime (0.8× ATR)", minval=0.1, step=0.1, group=group_regime, tooltip="Low volatility (<20%) - Framework v2.2.0 standard")
+atrMultiplierRed = input.float(1.5, "RED Regime (1.5× ATR)", minval=0.1, step=0.1, group=group_regime, tooltip="High volatility (>80%) - Framework v2.2.0 standard")
+
+// ============================================================================
+// ENTRY ZONE SETTINGS (Only visible in REAL mode)
+// ============================================================================
+group_entry_zone = "Entry Zone Visualization (REAL Mode Only)"
+showEntryZone = input.bool(true, "Show Entry Zone", group=group_entry_zone, tooltip="Shows optimal entry zone on certificate price scale - ONLY in REAL mode")
+entryZonePreviewMode = input.bool(true, "Preview Mode", group=group_entry_zone, tooltip="Show Entry Zone even without valid setup - ONLY in REAL mode")
+entryZoneTransparency = input.int(90, "Zone Transparency", minval=0, maxval=100, group=group_entry_zone)
+
+// ============================================================================
+// TABLE DISPLAY SETTINGS
+// ============================================================================
+group_display = "Display Settings"
+tableTextSize = input.string("Normal", "Table Text Size", options=["Tiny", "Small", "Normal", "Large"], group=group_display, tooltip="Adjust table text size for readability")
+
+// Convert string input to size constant
+getTextSize() =>
+    tableTextSize == "Tiny" ? size.tiny : tableTextSize == "Small" ? size.small : tableTextSize == "Large" ? size.large : size.normal
+
+textSize = getTextSize()
+
+// ============================================================================
+// AUTOMATED ENTRY TRACKING (Only available in REAL mode)
+// ============================================================================
+group_entry = "Entry Tracking (REAL Mode Only)"
+enableEntryTracking = input.bool(false, "Enable Entry Tracking", group=group_entry, tooltip="Automatically captures entry price at your entry timestamp - ONLY in REAL mode")
+entryTimestamp = input.time(timestamp("15 Nov 2025 09:30 +0000"), "Entry Date & Time", group=group_entry, tooltip="Select the date and time when you entered your trade. Uses chart's timezone.")
+manualLotSize = input.int(0, "Lot Size (if active position)", minval=0, group=group_entry, tooltip="Enter number of certificates you actually bought. Leave at 0 if no position.")
+showRiskRewardZones = input.bool(true, "Show Risk/Reward Zones", group=group_entry, tooltip="Shaded areas for stop and target zones")
+
+// ============================================================================
+// BID/ASK SPREAD (FIXED)
+// ============================================================================
+spreadCents = 1.0
+
+// ============================================================================
+// CURRENCY CONVERSION RATES
+// ============================================================================
+eurusdRate = not na(strikePrice) ? request.security("OANDA:EURUSD", timeframe.period, close) : na
+eurjpyRate = not na(strikePrice) ? request.security("OANDA:EURJPY", timeframe.period, close) : na
+eurchfRate = not na(strikePrice) ? request.security("OANDA:EURCHF", timeframe.period, close) : na
+eurcadRate = not na(strikePrice) ? request.security("OANDA:EURCAD", timeframe.period, close) : na
+
+// ============================================================================
+// CONVERSION RATE SELECTION LOGIC
+// ============================================================================
+getConversionRate(string instrument) =>
+    var float rate = 1.0
+    if str.contains(instrument, "USD/JPY") or str.contains(instrument, "EUR/JPY")
+        rate := eurjpyRate
+    else if str.contains(instrument, "EUR/CHF") or str.contains(instrument, "USD/CHF")
+        rate := eurchfRate
+    else if str.contains(instrument, "EUR/CAD") or str.contains(instrument, "USD/CAD")
+        rate := eurcadRate
+    else if str.contains(instrument, "DAX40")
+        rate := 1.0
+    else
+        rate := eurusdRate
+    rate
+
+conversionRate = certificateMode == "Estimate" ? getConversionRate(detectedInstrument) : getConversionRate(activeCertName)
+
+// ============================================================================
+// UNDERLYING PRICE FETCHING
+// ============================================================================
+underlyingPrice = not na(strikePrice) ? request.security(underlyingSymbol, timeframe.period, close) : na
+
+// ============================================================================
+// ATR-BASED AUTO STOP DISTANCE CALCULATION
+// ============================================================================
+underlyingATR = not na(strikePrice) ? request.security(underlyingSymbol, atrTimeframe, ta.atr(atrPeriod)) : na
+atrMA = not na(strikePrice) ? request.security(underlyingSymbol, atrTimeframe, ta.sma(ta.atr(atrPeriod), 20)) : na
+atrRatioToMA = not na(strikePrice) and not na(atrMA) and atrMA > 0 ? underlyingATR / atrMA : na
+
+certificateATR = not na(strikePrice) ? (underlyingATR / conversionRate) * multiplier : na
+
+var string currentRegime = "YELLOW"
+if not na(strikePrice)
+    if atrRatioToMA < 0.8
+        currentRegime := "GREEN"
+    else if atrRatioToMA > 1.2
+        currentRegime := "RED"
+    else
+        currentRegime := "YELLOW"
+
+atrMultiplier = currentRegime == "GREEN" ? atrMultiplierGreen : currentRegime == "RED" ? atrMultiplierRed : atrMultiplierYellow
+targetRMultiple = currentRegime == "GREEN" ? 1.5 : currentRegime == "RED" ? 1.5 : 1.3
+stopDistanceUnderlying = not na(strikePrice) ? underlyingATR * atrMultiplier : na
+
+// ============================================================================
+// CERTIFICATE VALUE AT CRITICAL LEVEL (NEW)
+// ============================================================================
+
+// Function to calculate certificate value at any underlying price
+calculateCertificateAtPrice(float underlyingPrice, float strike, float ratio, bool long_position, float conversion) =>
+    float intrinsic = long_position ? math.max(0, underlyingPrice - strike) : math.max(0, strike - underlyingPrice)
+    float intrinsicEUR = intrinsic / conversion
+    float certValue = intrinsicEUR * ratio
+    certValue
+
+// Calculate certificate value at pattern invalidation level
+float certValueAtCritical = na
+if not na(h1_critical_level) and not na(strikePrice)
+    certValueAtCritical := calculateCertificateAtPrice(h1_critical_level, strikePrice, multiplier, isLong, conversionRate)
+
+// ============================================================================
+// ENTRY ZONE CALCULATION (Only in REAL mode)
+// ============================================================================
+underlyingCloseCurrentTF = certificateMode == "Real" and not na(strikePrice) ? request.security(underlyingSymbol, timeframe.period, close) : na
+underlyingATRCurrentTF = certificateMode == "Real" and not na(strikePrice) ? request.security(underlyingSymbol, "15", ta.atr(14)) : na
+underlyingATRSeriesCurrentTF = certificateMode == "Real" and not na(strikePrice) ? request.security(underlyingSymbol, "15", ta.atr(14)) : na
+
+atrRegimeCalc(float atr, float atrSeries, int lookback) =>
+    atrPercentile = ta.percentrank(atrSeries, lookback)
+    atrPercentile < 20 ? "LOW" : atrPercentile > 80 ? "HIGH" : "NORMAL"
+
+currentTFRegime = certificateMode == "Real" and not na(strikePrice) ? atrRegimeCalc(underlyingATRCurrentTF, underlyingATRSeriesCurrentTF, 50) : "NORMAL"
+entryZoneWidthMultiplier = currentTFRegime == "LOW" ? 0.2 : currentTFRegime == "HIGH" ? 0.4 : 0.3
+
+underlyingEntryZoneUpper = certificateMode == "Real" and not na(strikePrice) ? underlyingCloseCurrentTF + (underlyingATRCurrentTF * entryZoneWidthMultiplier) : na
+underlyingEntryZoneLower = certificateMode == "Real" and not na(strikePrice) ? underlyingCloseCurrentTF - (underlyingATRCurrentTF * entryZoneWidthMultiplier) : na
+
+calculateCertPrice(float underlyingVal) =>
+    float intrinsic = isLong ? math.max(0, underlyingVal - strikePrice) : math.max(0, strikePrice - underlyingVal)
+    float intrinsicEUR = intrinsic / conversionRate
+    intrinsicEUR * multiplier
+
+certEntryZoneUpper = certificateMode == "Real" and not na(strikePrice) ? calculateCertPrice(underlyingEntryZoneUpper) : na
+certEntryZoneLower = certificateMode == "Real" and not na(strikePrice) ? calculateCertPrice(underlyingEntryZoneLower) : na
+
+showZone = certificateMode == "Real" and showEntryZone and not na(strikePrice) and barstate.islast and (entryZonePreviewMode or enableEntryTracking)
+
+// ============================================================================
+// CERTIFICATE PRICE CALCULATION (Using chart's OWN OHLC)
+// ============================================================================
+intrinsicValueUnderlying = not na(strikePrice) ? (isLong ? math.max(0, close - strikePrice) : math.max(0, strikePrice - close)) : na
+intrinsicValueEUR = not na(strikePrice) ? intrinsicValueUnderlying / conversionRate : na
+baseCertPrice = not na(strikePrice) ? intrinsicValueEUR * multiplier : na
+
+spreadEUR = spreadCents / 100
+certPriceMid = baseCertPrice
+certPriceBid = not na(strikePrice) ? certPriceMid - (spreadEUR / 2) : na
+certPriceAsk = not na(strikePrice) ? certPriceMid + (spreadEUR / 2) : na
+
+// ============================================================================
+// AUTOMATED ENTRY TRACKING (Only in REAL mode)
+// ============================================================================
+var float capturedEntryPrice = na
+var int capturedEntryTime = 0
+var float capturedStopDistance = na
+var float capturedTargetDistance = na
+var float capturedUnderlyingPrice = na
+var float capturedUnderlyingStopDistance = na
+var float capturedUnderlyingTargetDistance = na
+
+stopDistanceEUR = not na(strikePrice) ? stopDistanceUnderlying / conversionRate : na
+stopDistanceCert = not na(strikePrice) ? stopDistanceEUR * multiplier : na
+targetDistanceUnderlying = not na(strikePrice) ? stopDistanceUnderlying * targetRMultiple : na
+targetDistanceEUR = not na(strikePrice) ? stopDistanceEUR * targetRMultiple : na
+targetDistanceCert = not na(strikePrice) ? stopDistanceCert * targetRMultiple : na
+
+// PATTERN RISK CALCULATIONS (NEW)
+float riskPerCertPattern = na
+float totalRiskPattern = na
+float patternRiskPercent = na
+
+if not na(certValueAtCritical) and not na(certPriceMid)
+    // Risk per certificate if using pattern-aligned stop
+    riskPerCertPattern := math.abs(certPriceMid - certValueAtCritical)
+    
+    // Calculate units needed based on pattern stop
+    unitsNeededPattern = enablePositionSizing and riskPerCertPattern > 0 ? math.floor(riskAmount / riskPerCertPattern) : na
+    
+    // Total risk with pattern-based position size
+    if not na(unitsNeededPattern) and unitsNeededPattern > 0
+        totalRiskPattern := riskPerCertPattern * unitsNeededPattern
+        patternRiskPercent := (totalRiskPattern / riskAmount) * 100
+
+// Decide which stop to use based on toggle
+finalStopDistance = usePatternStop and not na(riskPerCertPattern) ? riskPerCertPattern : stopDistanceCert
+finalUnitsNeeded = usePatternStop and not na(certValueAtCritical) and enablePositionSizing and riskPerCertPattern > 0 ? math.floor(riskAmount / riskPerCertPattern) : enablePositionSizing and stopDistanceCert > 0 ? math.floor(riskAmount / stopDistanceCert) : na
+
+if certificateMode == "Real" and enableEntryTracking and na(capturedEntryPrice) and time >= entryTimestamp and not na(strikePrice)
+    capturedEntryPrice := certPriceMid
+    capturedEntryTime := time
+    capturedStopDistance := finalStopDistance
+    capturedTargetDistance := targetDistanceCert
+    capturedUnderlyingPrice := underlyingPrice
+    capturedUnderlyingStopDistance := stopDistanceUnderlying
+    capturedUnderlyingTargetDistance := targetDistanceUnderlying
+
+entryPrice = certificateMode == "Real" and enableEntryTracking ? capturedEntryPrice : 0.0
+timeInTrade = certificateMode == "Real" and enableEntryTracking and not na(capturedEntryPrice) and time >= capturedEntryTime ? math.floor((time - capturedEntryTime) / 60000) : 0
+
+// ============================================================================
+// KNOCKOUT DISTANCE CALCULATIONS
+// ============================================================================
+distanceToKO = not na(strikePrice) ? (isLong ? ((underlyingPrice - strikePrice) / underlyingPrice * 100) : ((strikePrice - underlyingPrice) / underlyingPrice * 100)) : na
+koDistanceInATR = not na(strikePrice) and underlyingATR > 0 ? math.abs(underlyingPrice - strikePrice) / underlyingATR : na
+knockoutWarning5Percent = not na(strikePrice) and distanceToKO < 5.0 and distanceToKO > 0
+knockoutWarningATR = not na(strikePrice) and enableATRMonitoring and koDistanceInATR < minKODistance and koDistanceInATR > 0
+isKnockedOut = not na(strikePrice) and ((isLong and underlyingPrice <= strikePrice) or (not isLong and underlyingPrice >= strikePrice))
+
+// ============================================================================
+// POSITION SIZING
+// ============================================================================
+unitsNeeded = finalUnitsNeeded
+hasActivePosition = certificateMode == "Real" and enableEntryTracking and manualLotSize > 0 and entryPrice > 0
+actualLotSize = hasActivePosition ? manualLotSize : unitsNeeded
+
+positionCostActive = hasActivePosition ? manualLotSize * entryPrice : na
+positionCostInactive = not hasActivePosition and not na(strikePrice) and enablePositionSizing ? unitsNeeded * certPriceAsk : na
+finalPositionCost = hasActivePosition ? positionCostActive : positionCostInactive
+
+actualRiskActive = hasActivePosition and not na(capturedStopDistance) ? manualLotSize * capturedStopDistance : na
+actualRiskInactive = not hasActivePosition and not na(strikePrice) and enablePositionSizing ? unitsNeeded * finalStopDistance : na
+finalActualRisk = hasActivePosition ? actualRiskActive : actualRiskInactive
+
+expectedProfitActive = hasActivePosition and not na(capturedTargetDistance) ? manualLotSize * capturedTargetDistance : na
+expectedProfitInactive = not hasActivePosition and not na(strikePrice) and enablePositionSizing ? unitsNeeded * targetDistanceCert : na
+finalExpectedProfit = hasActivePosition ? expectedProfitActive : expectedProfitInactive
+
+// ============================================================================
+// CERTIFICATE STOP/TARGET PRICES
+// ============================================================================
+stopLossPriceActive = hasActivePosition and not na(capturedStopDistance) ? entryPrice - capturedStopDistance : na
+stopLossPriceInactive = not hasActivePosition and not na(strikePrice) ? certPriceMid - finalStopDistance : na
+finalStopLossPrice = hasActivePosition ? stopLossPriceActive : stopLossPriceInactive
+
+// Use pattern stop if enabled
+if usePatternStop and not na(certValueAtCritical) and not hasActivePosition
+    finalStopLossPrice := certValueAtCritical
+
+takeProfitPriceActive = hasActivePosition and not na(capturedTargetDistance) ? entryPrice + capturedTargetDistance : na
+takeProfitPriceInactive = not hasActivePosition and not na(strikePrice) ? certPriceMid + targetDistanceCert : na
+finalTakeProfitPrice = hasActivePosition ? takeProfitPriceActive : takeProfitPriceInactive
+
+// ============================================================================
+// UNDERLYING STOP/TARGET PRICES
+// ============================================================================
+underlyingStopInactive = not na(strikePrice) ? (isLong ? underlyingPrice - stopDistanceUnderlying : underlyingPrice + stopDistanceUnderlying) : na
+underlyingTargetInactive = not na(strikePrice) ? (isLong ? underlyingPrice + targetDistanceUnderlying : underlyingPrice - targetDistanceUnderlying) : na
+
+// Use pattern critical level if enabled
+if usePatternStop and not na(h1_critical_level)
+    underlyingStopInactive := h1_critical_level
+
+underlyingStopActive = hasActivePosition and not na(capturedUnderlyingStopDistance) ? (isLong ? capturedUnderlyingPrice - capturedUnderlyingStopDistance : capturedUnderlyingPrice + capturedUnderlyingStopDistance) : na
+underlyingTargetActive = hasActivePosition and not na(capturedUnderlyingTargetDistance) ? (isLong ? capturedUnderlyingPrice + capturedUnderlyingTargetDistance : capturedUnderlyingPrice - capturedUnderlyingTargetDistance) : na
+
+finalUnderlyingStop = hasActivePosition ? underlyingStopActive : underlyingStopInactive
+finalUnderlyingTarget = hasActivePosition ? underlyingTargetActive : underlyingTargetInactive
+
+// ============================================================================
+// TRADE VISUALIZATION CALCULATIONS
+// ============================================================================
+stopPrice = certificateMode == "Real" and enableEntryTracking and entryPrice > 0 and not na(capturedStopDistance) ? entryPrice - capturedStopDistance : na
+targetPrice = certificateMode == "Real" and enableEntryTracking and entryPrice > 0 and not na(capturedTargetDistance) ? entryPrice + capturedTargetDistance : na
+riskEUR = certificateMode == "Real" and enableEntryTracking and entryPrice > 0 and unitsNeeded > 0 and not na(capturedStopDistance) ? unitsNeeded * capturedStopDistance : na
+rewardEUR = certificateMode == "Real" and enableEntryTracking and entryPrice > 0 and unitsNeeded > 0 and not na(capturedTargetDistance) ? unitsNeeded * capturedTargetDistance : na
+rrRatio = certificateMode == "Real" and enableEntryTracking and entryPrice > 0 and riskEUR > 0 ? rewardEUR / riskEUR : na
+currentPL = certificateMode == "Real" and enableEntryTracking and entryPrice > 0 and unitsNeeded > 0 ? unitsNeeded * (certPriceMid - entryPrice) : na
+currentRMultiple = certificateMode == "Real" and enableEntryTracking and entryPrice > 0 and riskEUR > 0 ? currentPL / riskEUR : na
+maxTradeMinutes = 60
+timeRemaining = certificateMode == "Real" and enableEntryTracking and timeInTrade > 0 ? maxTradeMinutes - timeInTrade : na
+timeWarning = certificateMode == "Real" and enableEntryTracking and timeInTrade > 0 and timeRemaining <= 10
+
+// ============================================================================
+// CERTIFICATE CANDLESTICKS (Using chart's OWN OHLC)
+// ============================================================================
+certPriceOpen = not na(strikePrice) ? calculateCertPrice(open) : na
+certPriceHigh = not na(strikePrice) ? calculateCertPrice(high) : na
+certPriceLow = not na(strikePrice) ? calculateCertPrice(low) : na
+certPriceClose = not na(strikePrice) ? calculateCertPrice(close) : na
+
+plotcandle(certPriceOpen, certPriceHigh, certPriceLow, certPriceClose, "Certificate Price", color=certPriceClose >= certPriceOpen ? color.new(color.green, 0) : color.new(color.red, 0), wickcolor=certPriceClose >= certPriceOpen ? color.new(color.green, 0) : color.new(color.red, 0), bordercolor=certPriceClose >= certPriceOpen ? color.new(color.green, 0) : color.new(color.red, 0))
+
+plot(not na(strikePrice) ? certPriceBid : na, "Bid Line", color=color.new(color.orange, 50), linewidth=1, style=plot.style_line, display=display.none)
+plot(not na(strikePrice) ? certPriceAsk : na, "Ask Line", color=color.new(color.blue, 50), linewidth=1, style=plot.style_line, display=display.none)
+
+// ============================================================================
+// ENTRY ZONE VISUALIZATION (Only in REAL mode)
+// ============================================================================
+var box entryZoneBox = na
+
+if not na(entryZoneBox)
+    box.delete(entryZoneBox)
+    entryZoneBox := na
+
+if showZone
+    boxLeft = bar_index
+    boxRight = bar_index + 5
+    boxBorderColor = isLong ? color.new(color.green, 50) : color.new(color.red, 50)
+    boxFillColor = isLong ? color.new(color.green, entryZoneTransparency) : color.new(color.red, entryZoneTransparency)
+    entryZoneBox := box.new(boxLeft, certEntryZoneUpper, boxRight, certEntryZoneLower, border_color=boxBorderColor, bgcolor=boxFillColor, border_width=2, text="Entry Zone", text_color=color.white, text_size=size.small)
+
+var box underlyingEntryZoneBox = na
+
+if not na(underlyingEntryZoneBox)
+    box.delete(underlyingEntryZoneBox)
+    underlyingEntryZoneBox := na
+
+if showZone
+    boxLeft = bar_index
+    boxRight = bar_index + 5
+    boxBorderColor = isLong ? color.new(color.green, 50) : color.new(color.red, 50)
+    boxFillColor = isLong ? color.new(color.green, entryZoneTransparency) : color.new(color.red, entryZoneTransparency)
+    underlyingEntryZoneBox := box.new(boxLeft, underlyingEntryZoneUpper, boxRight, underlyingEntryZoneLower, border_color=boxBorderColor, bgcolor=boxFillColor, border_width=2, text="Entry Zone", text_color=color.white, text_size=size.small, force_overlay=true)
+
+// ============================================================================
+// PATTERN STOP VISUALIZATION (NEW)
+// ============================================================================
+var line patternStopLine = na
+var label patternStopLabel = na
+
+if barstate.islast and not na(certValueAtCritical) and activePattern != "NONE" and showPatternLines
+    // Delete old line and label
+    line.delete(patternStopLine)
+    label.delete(patternStopLabel)
+    
+    // Determine line color based on pattern type
+    lineColor = activePattern == "EPL" or activePattern == "CBRL" ? color.new(color.green, 30) : activePattern == "EPS" or activePattern == "CBRS" ? color.new(color.red, 30) : color.new(color.gray, 50)
+    
+    // Determine line style
+    lineStyleValue = patternLineStyle == "Solid" ? line.style_solid : patternLineStyle == "Dashed" ? line.style_dashed : line.style_dotted
+    
+    // Draw new line
+    patternStopLine := line.new(bar_index - 10, certValueAtCritical, bar_index + 10, certValueAtCritical, color=lineColor, width=2, style=lineStyleValue)
+    
+    // Add label with details
+    labelText = "Pattern Stop: €" + str.tostring(certValueAtCritical, "#.##") + "\nRisk: €" + str.tostring(totalRiskPattern, "#.##")
+    
+    patternStopLabel := label.new(bar_index + 10, certValueAtCritical, labelText, style=label.style_label_left, color=lineColor, textcolor=color.white, size=size.small)
+
+// Also draw critical level on underlying (main chart)
+var line underlyingCriticalLine = na
+if barstate.islast and not na(h1_critical_level) and activePattern != "NONE" and showPatternLines
+    line.delete(underlyingCriticalLine)
+    lineStyleValue = patternLineStyle == "Solid" ? line.style_solid : patternLineStyle == "Dashed" ? line.style_dashed : line.style_dotted
+    underlyingCriticalLine := line.new(bar_index - 10, h1_critical_level, bar_index + 10, h1_critical_level, color=color.new(color.purple, 30), width=2, style=lineStyleValue, force_overlay=true)
+
+// ============================================================================
+// CERTIFICATE LINES - ENTRY/STOP/TARGET (INDICATOR PANE)
+// ============================================================================
+var int lineStartBar = 0
+var int entryBarIndex = 0
+
+if certificateMode == "Real" and enableEntryTracking and not na(capturedEntryPrice) and time >= capturedEntryTime and entryBarIndex == 0
+    entryBarIndex := bar_index
+
+if hasActivePosition
+    lineStartBar := entryBarIndex > 0 ? entryBarIndex : bar_index - 50
+else
+    int msPerBar = timeframe.in_seconds() * 1000
+    int twoDaysMs = 2 * 24 * 60 * 60 * 1000
+    int barsIn2Days = math.floor(twoDaysMs / msPerBar)
+    lineStartBar := bar_index - barsIn2Days
+
+int lineEndBar = bar_index + 3
+
+var line entryLine = na
+var line stopLine = na
+var line targetLine = na
+
+if not na(strikePrice) and barstate.islast
+    if not na(entryLine)
+        line.delete(entryLine)
+    if not na(stopLine)
+        line.delete(stopLine)
+    if not na(targetLine)
+        line.delete(targetLine)
+    
+    if hasActivePosition and entryPrice > 0 and stopPrice > 0 and targetPrice > 0
+        entryLine := line.new(lineStartBar, entryPrice, lineEndBar, entryPrice, color=color.new(color.white, 0), width=2, style=line.style_solid)
+        stopLine := line.new(lineStartBar, stopPrice, lineEndBar, stopPrice, color=color.new(color.red, 0), width=2, style=line.style_solid)
+        targetLine := line.new(lineStartBar, targetPrice, lineEndBar, targetPrice, color=color.new(color.green, 0), width=2, style=line.style_solid)
+    else if not hasActivePosition
+        float hypotheticalStop = usePatternStop and not na(certValueAtCritical) ? certValueAtCritical : certPriceMid - stopDistanceCert
+        float hypotheticalTarget = certPriceMid + targetDistanceCert
+        stopLine := line.new(lineStartBar, hypotheticalStop, lineEndBar, hypotheticalStop, color=color.new(color.red, 0), width=2, style=line.style_dotted)
+        targetLine := line.new(lineStartBar, hypotheticalTarget, lineEndBar, hypotheticalTarget, color=color.new(color.green, 0), width=2, style=line.style_dotted)
+
+// ============================================================================
+// UNDERLYING LINES - STOP/TARGET (MAIN CHART)
+// ============================================================================
+var line underlyingStopLine = na
+var line underlyingTargetLine = na
+
+if not na(strikePrice) and barstate.islast
+    if not na(underlyingStopLine)
+        line.delete(underlyingStopLine)
+    if not na(underlyingTargetLine)
+        line.delete(underlyingTargetLine)
+    
+    if not na(finalUnderlyingStop)
+        underlyingStopLine := line.new(lineStartBar, finalUnderlyingStop, lineEndBar, finalUnderlyingStop, color=color.new(color.red, 0), width=2, style=hasActivePosition ? line.style_solid : line.style_dotted, force_overlay=true)
+    
+    if not na(finalUnderlyingTarget)
+        underlyingTargetLine := line.new(lineStartBar, finalUnderlyingTarget, lineEndBar, finalUnderlyingTarget, color=color.new(color.green, 0), width=2, style=hasActivePosition ? line.style_solid : line.style_dotted, force_overlay=true)
+
+// ============================================================================
+// SHADED RISK/REWARD ZONES (Only in REAL mode)
+// ============================================================================
+riskZoneTop = certificateMode == "Real" and enableEntryTracking and showRiskRewardZones and entryPrice > 0 ? entryPrice : na
+riskZoneBottom = certificateMode == "Real" and enableEntryTracking and showRiskRewardZones and entryPrice > 0 ? stopPrice : na
+rewardZoneTop = certificateMode == "Real" and enableEntryTracking and showRiskRewardZones and entryPrice > 0 ? targetPrice : na
+rewardZoneBottom = certificateMode == "Real" and enableEntryTracking and showRiskRewardZones and entryPrice > 0 ? entryPrice : na
+
+fill(plot(riskZoneTop, display=display.none), plot(riskZoneBottom, display=display.none), color=color.new(color.red, 90), title="Risk Zone")
+fill(plot(rewardZoneTop, display=display.none), plot(rewardZoneBottom, display=display.none), color=color.new(color.green, 90), title="Reward Zone")
+
+// Background warnings: Only show in REAL mode with active position
+showWarnings = certificateMode == "Real" and hasActivePosition
+bgcolor(showWarnings and isKnockedOut ? color.new(color.red, 70) : showWarnings and knockoutWarningATR ? color.new(color.orange, 90) : showWarnings and knockoutWarning5Percent ? color.new(color.yellow, 95) : na, title="KO Warning Zones")
+bgcolor(showWarnings and timeWarning ? color.new(color.purple, 95) : na, title="Time Warning")
+
+// ============================================================================
+// COMPREHENSIVE TABLE (4-Column Layout for Compactness)
+// ============================================================================
+var table certTable = table.new(position.top_right, 4, 12, border_width=1)
+
+if barstate.islast and not na(strikePrice)
+    
+    // SECTION 1: CERTIFICATE INFORMATION (Row 0-1)
+    table.cell(certTable, 0, 0, "═══ CERTIFICATE INFO ═══", text_color=color.yellow, bgcolor=color.new(color.blue, 50), text_size=textSize)
+    table.cell(certTable, 1, 0, "", bgcolor=color.new(color.blue, 50))
+    table.cell(certTable, 2, 0, activeCertName, bgcolor=color.new(color.blue, 50), text_color=color.white, text_size=textSize)
+    table.cell(certTable, 3, 0, "", bgcolor=color.new(color.blue, 50))
+    
+    // Row 1: Mode & Underlying
+    table.cell(certTable, 0, 1, "Mode:", text_color=color.white, text_size=textSize)
+    var color modeColor = certificateMode == "Estimate" ? color.new(color.gray, 70) : color.new(color.blue, 70)
+    table.cell(certTable, 1, 1, certificateMode, text_color=color.white, bgcolor=modeColor, text_size=textSize)
+    table.cell(certTable, 2, 1, "Underlying:", text_color=color.white, text_size=textSize)
+    table.cell(certTable, 3, 1, underlyingSymbol, text_color=color.white, text_size=textSize)
+    
+    // Row 2: Direction/Ratio & Strike
+    table.cell(certTable, 0, 2, "Dir/Ratio:", text_color=color.white, text_size=textSize)
+    directionText = isLong ? "LONG" : "SHORT"
+    table.cell(certTable, 1, 2, directionText + " / " + str.tostring(multiplier, "#.####"), text_color=color.white, text_size=textSize)
+    table.cell(certTable, 2, 2, "Strike/KO:", text_color=color.white, text_size=textSize)
+    table.cell(certTable, 3, 2, str.tostring(strikePrice, "#.####"), text_color=color.white, text_size=textSize)
+    
+    // Row 3: Certificate Price & KO Distance
+    table.cell(certTable, 0, 3, "Cert Price:", text_color=color.white, text_size=textSize)
+    table.cell(certTable, 1, 3, str.tostring(certPriceMid, "#.##") + " EUR", text_color=color.white, text_size=textSize)
+    table.cell(certTable, 2, 3, "KO Dist:", text_color=color.white, text_size=textSize, tooltip="Daily ATR multiples until knockout")
+    koColorATR = knockoutWarningATR ? color.new(color.red, 0) : color.new(color.green, 70)
+    table.cell(certTable, 3, 3, str.tostring(koDistanceInATR, "#.##") + "× ATR", text_color=color.white, bgcolor=koColorATR, text_size=textSize, tooltip="Framework requires ≥2.0× ATR")
+    
+    // Row 4: Position Status & Entry Price (if active)
+    table.cell(certTable, 0, 4, "Status:", text_color=color.white, text_size=textSize)
+    var string positionStatusText = "Inactive"
+    var color positionStatusColor = color.new(color.gray, 80)
+    
+    if hasActivePosition and timeInTrade > 0
+        if timeRemaining <= 0
+            positionStatusText := "⛔ EXIT (" + str.tostring(timeInTrade, "#") + "m)"
+            positionStatusColor := color.new(color.red, 0)
+        else if timeRemaining <= 10
+            positionStatusText := "🚨 CLOSE (" + str.tostring(timeRemaining, "#") + "m)"
+            positionStatusColor := color.new(color.orange, 0)
+        else
+            positionStatusText := "Active (" + str.tostring(timeRemaining, "#") + "m left)"
+            positionStatusColor := color.new(color.green, 50)
+    
+    table.cell(certTable, 1, 4, positionStatusText, text_color=color.white, bgcolor=positionStatusColor, text_size=textSize)
+    
+    if hasActivePosition
+        table.cell(certTable, 2, 4, "Entry:", text_color=color.white, text_size=textSize)
+        table.cell(certTable, 3, 4, str.tostring(entryPrice, "#.##") + " EUR", text_color=color.white, text_size=textSize)
+    else
+        table.cell(certTable, 2, 4, "Regime:", text_color=color.white, text_size=textSize, tooltip="Volatility regime based on Daily ATR")
+        regimeColor = currentRegime == "GREEN" ? color.new(color.green, 70) : currentRegime == "RED" ? color.new(color.red, 70) : color.new(color.yellow, 70)
+        regimeText = currentRegime + " (" + str.tostring(atrMultiplier, "#.#") + "×)"
+        table.cell(certTable, 3, 4, regimeText, text_color=color.white, bgcolor=regimeColor, text_size=textSize)
+    
+    // SECTION 2: TRADE PLAN (Row 5-7)
+    table.cell(certTable, 0, 5, "═══ TRADE PLAN ═══", text_color=color.yellow, bgcolor=color.new(color.green, 50), text_size=textSize)
+    table.cell(certTable, 1, 5, "", bgcolor=color.new(color.green, 50))
+    table.cell(certTable, 2, 5, "", bgcolor=color.new(color.green, 50))
+    table.cell(certTable, 3, 5, "", bgcolor=color.new(color.green, 50))
+    
+    // Row 6: Stop & Target
+    table.cell(certTable, 0, 6, "Stop:", text_color=color.white, text_size=textSize, tooltip="Certificate stop price")
+    var string stopStatusLabel = hasActivePosition ? " (FIX)" : (usePatternStop and not na(certValueAtCritical) ? " (PTN)" : " (ATR)")
+    table.cell(certTable, 1, 6, str.tostring(finalStopLossPrice, "#.##") + stopStatusLabel, text_color=color.white, bgcolor=color.new(color.red, 70), text_size=textSize)
+    
+    table.cell(certTable, 2, 6, "Target:", text_color=color.white, text_size=textSize, tooltip="Certificate target price")
+    var string tpStatusLabel = hasActivePosition ? " (FIX)" : " (dyn)"
+    tpText = str.tostring(finalTakeProfitPrice, "#.##") + tpStatusLabel
+    table.cell(certTable, 3, 6, tpText + " [" + str.tostring(targetRMultiple, "#.#") + "R]", text_color=color.white, bgcolor=color.new(color.green, 70), text_size=textSize)
+    
+    // Row 7: Lot Size & Position Cost
+    table.cell(certTable, 0, 7, "Lots:", text_color=color.white, text_size=textSize)
+    var string lotStatusLabel = hasActivePosition ? " (man)" : " (calc)"
+    table.cell(certTable, 1, 7, str.tostring(actualLotSize, "#") + lotStatusLabel, text_color=color.white, text_size=textSize)
+    
+    table.cell(certTable, 2, 7, "Cost:", text_color=color.white, text_size=textSize)
+    table.cell(certTable, 3, 7, "€" + str.tostring(finalPositionCost, "#.##"), text_color=color.white, text_size=textSize)
+    
+    // Row 8: Risk/Profit & Current P&L (if active)
+    table.cell(certTable, 0, 8, "Risk/Profit:", text_color=color.white, text_size=textSize, tooltip="EUR at risk / EUR profit potential")
+    table.cell(certTable, 1, 8, "€" + str.tostring(finalActualRisk, "#.##") + "/€" + str.tostring(finalExpectedProfit, "#.##"), text_color=color.white, text_size=textSize)
+    
+    if hasActivePosition
+        table.cell(certTable, 2, 8, "P&L:", text_color=color.white, text_size=textSize)
+        plColor = currentPL > 0 ? color.new(color.green, 70) : currentPL < 0 ? color.new(color.red, 70) : na
+        plText = (currentPL > 0 ? "+" : "") + str.tostring(currentPL, "#.##") + " [" + str.tostring(currentRMultiple, "#.##") + "R]"
+        table.cell(certTable, 3, 8, plText, text_color=color.white, bgcolor=plColor, text_size=textSize)
+    else
+        table.cell(certTable, 2, 8, "", text_size=textSize)
+        table.cell(certTable, 3, 8, "", text_size=textSize)
+    
+    // SECTION 3: PATTERN ANALYSIS (Row 9-11)
+    table.cell(certTable, 0, 9, "═══ PATTERN ═══", text_color=color.yellow, bgcolor=color.new(color.purple, 50), text_size=textSize)
+    table.cell(certTable, 1, 9, "", bgcolor=color.new(color.purple, 50))
+    table.cell(certTable, 2, 9, "", bgcolor=color.new(color.purple, 50))
+    table.cell(certTable, 3, 9, "", bgcolor=color.new(color.purple, 50))
+    
+    // Row 10: Pattern & Critical Level
+    table.cell(certTable, 0, 10, "Pattern:", text_color=color.white, text_size=textSize)
+    patternColor = activePattern == "EPL" ? color.new(color.green, 70) : activePattern == "EPS" ? color.new(color.red, 70) : color.new(color.gray, 70)
+    patternDisplay = activePattern != "NONE" ? activePattern + " (" + buffer_rating + ")" : "None"
+    table.cell(certTable, 1, 10, patternDisplay, text_color=color.white, bgcolor=patternColor, text_size=textSize, tooltip="Pattern from 1H timeframe")
+    
+    table.cell(certTable, 2, 10, "Fails @:", text_color=color.white, text_size=textSize, tooltip="Underlying price where pattern invalidates")
+    criticalLevelDisplay = not na(h1_critical_level) ? str.tostring(h1_critical_level, "#.#####") : "N/A"
+    table.cell(certTable, 3, 10, criticalLevelDisplay, text_color=color.white, text_size=textSize)
+    
+    // Row 11: Certificate at Critical & Pattern Risk
+    table.cell(certTable, 0, 11, "Cert@Crit:", text_color=color.white, text_size=textSize, tooltip="Certificate value when pattern invalidates")
+    certCriticalDisplay = not na(certValueAtCritical) ? "€" + str.tostring(certValueAtCritical, "#.##") : "N/A"
+    table.cell(certTable, 1, 11, certCriticalDisplay, text_color=color.white, text_size=textSize)
+    
+    table.cell(certTable, 2, 11, "PTN Risk:", text_color=color.white, text_size=textSize, tooltip="EUR risk if using pattern stop")
+    riskColor = not na(patternRiskPercent) ? (patternRiskPercent > 120 ? color.new(color.red, 70) : patternRiskPercent > 100 ? color.new(color.orange, 70) : color.new(color.green, 70)) : color.new(color.gray, 70)
+    riskDisplay = not na(totalRiskPattern) ? "€" + str.tostring(totalRiskPattern, "#.##") + " (" + str.tostring(patternRiskPercent, "#") + "%)" : "N/A"
+    table.cell(certTable, 3, 11, riskDisplay, text_color=color.white, bgcolor=riskColor, text_size=textSize)
+
+// ============================================================================
+// ALERT CONDITIONS
+// ============================================================================
+alertcondition(knockoutWarningATR, "Framework Alert: KO Too Close", "⚠️ KO distance below 2.0× ATR - Framework 2.2.0 non-compliant")
+alertcondition(knockoutWarning5Percent, "Near Knockout (5%)", "Certificate within 5% of knockout level")
+alertcondition(isLong and underlyingPrice <= strikePrice, "Long Certificate Knocked Out", "🚨 Long certificate knocked out")
+alertcondition(not isLong and underlyingPrice >= strikePrice, "Short Certificate Knocked Out", "🚨 Short certificate knocked out")
+alertcondition(certificateMode == "Real" and enableEntryTracking and timeInTrade > 0 and timeRemaining <= 10 and timeRemaining > 0, "Time Warning: Exit Soon", "🚨 Less than 10 minutes remaining - prepare to exit")
+alertcondition(certificateMode == "Real" and enableEntryTracking and timeInTrade > 0 and timeRemaining <= 0, "Time Alert: Force Exit", "⛔ 60-minute limit reached - exit immediately")
+alertcondition(activePattern != "NONE" and buffer_rating == "FRAGILE", "Pattern Alert: FRAGILE Buffer", "⚠️ Pattern buffer FRAGILE - Consider entry timing or skip")

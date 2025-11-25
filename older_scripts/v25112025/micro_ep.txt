@@ -1,0 +1,1003 @@
+//@version=6
+// Micro_EP v2.2 - COMPLETE VERSION WITH ALERTS
+// Created: 2025-11-21 (v2.0)
+// Updated: 2025-11-22 (v2.1) - Added 1H Buffer Integration
+// Updated: 2025-11-25 (v2.2) - ALERT IMPLEMENTATION
+//
+// NEW IN v2.2: Alert Condition Implementation
+//   - ADDED: 1H zone check (50-100 EMA) as REQUIRED condition for Trigger A
+//   - ADDED: alertcondition() for EPL Trigger A (oversold bounce)
+//   - ADDED: alertcondition() for EPS Trigger A (overbought reversal)
+//   - ENHANCED: Candle pattern tracking (Hammer/Shooting Star/Engulfing/Pin)
+//   - ENHANCED: Alert messages include: price, RSI, pattern name, range exhaustion
+//   - CONFIGURED: "Once Per Bar Close" timing (no intrabar alerts)
+//   - PURPOSE: Enable real-time entry notifications per Entry_Trigger_Alert_Specifications_v1.0
+//
+// ENHANCEMENTS FROM v2.0:
+//   - RENAMED: Focus on EPL/EPS pattern entry execution
+//   - ADDED: Explicit candle pattern recognition (Hammer, Shooting Star, Engulfing, Pin bars)
+//   - ADDED: Entry trigger labels (TRIGGER A/B/C) for Pattern Library alignment
+//   - RESTRUCTURED: Signal logic into Triggers A/B/C matching Pattern Library v1.9
+//   - ENHANCED: Table display shows which trigger is active
+//   - KEPT: All v1.6 features (auto macro trend, divergence, daily exhaustion, price action)
+//
+// NEW IN v2.1: 1H Buffer Integration
+//   - ADDED: Display 1H pattern risk rating (STRONG/MODERATE/WEAK/FRAGILE)
+//   - ADDED: Show critical invalidation level from 1H for stop loss reference
+//   - ADDED: Optional chart line at critical level
+//   - ADDED: 2 new table rows (1H Risk + 1H Critical Level)
+//   - PURPOSE: Enable stop loss placement and KO certificate leverage selection on 5M chart
+//   - NOTE: All v2.0 features remain intact - this is ADDITIVE ONLY
+//   - IMPLEMENTATION: Replicates Macro_Patterns v1.2 buffer calculation logic
+//   - CALCULATES: 3 distance buffers (Macro Trend, Zone Exit, 100 EMA) + ADX time buffer
+//   - DISPLAYS: Weakest buffer source as critical level + overall risk rating
+//
+// Purpose: Tactical 5M entry signals for EPL/EPS patterns with precise trigger identification
+
+indicator("Micro_EP v2.2", overlay=false, precision=1)
+
+// ============================================
+// INPUT PARAMETERS
+// ============================================
+
+// 1H Buffer Integration Settings - NEW in v2.1
+enable_1h_risk_display = input.bool(true, "Show 1H Pattern Risk", group="1H Buffer Integration", tooltip="Display risk rating calculated from 1H buffer system\nReplicates Macro_Patterns v1.2 logic\nHelps time entry urgency based on pattern stability")
+enable_1h_critical_level = input.bool(true, "Show 1H Critical Level", group="1H Buffer Integration", tooltip="Display pattern invalidation level (weakest buffer source)\nCalculated from: Macro Trend (200 EMA), Zone Exit (100 EMA), or 100 EMA violation\nUse for stop loss placement")
+show_critical_line = input.bool(true, "Show Critical Level Line on Chart", group="1H Buffer Integration", tooltip="Draw horizontal line at critical level for visual reference\nRed line shows exact price where pattern invalidates")
+critical_line_style_input = input.string("dashed", "Critical Line Style", options=["solid", "dashed", "dotted"], group="1H Buffer Integration")
+
+// Macro Alignment Settings - ENHANCED with Auto Detection
+macro_mode = input.string("Auto from 1H", "Macro Alignment Mode", options=["Auto from 1H", "Manual Override"], group="Macro Alignment", tooltip="Auto from 1H: Reads 1H chart automatically (zero maintenance)\nManual Override: You set BULL/BEAR/NEUTRAL/SHOW ALL")
+macro_trend_manual = input.string("BULL", "Manual Macro Trend", options=["BULL", "BEAR", "NEUTRAL", "SHOW ALL"], group="Macro Alignment", tooltip="Only used when Manual Override selected\nBULL: Show only LONG signals\nBEAR: Show only SHORT signals\nNEUTRAL: No signals (waiting)\nSHOW ALL: Educational mode - see all setups")
+
+// RSI Settings - Enhanced
+rsi_length = input.int(14, "RSI Period", group="RSI Settings")
+rsi_smoothing_1 = input.int(3, "RSI Smoothing EMA 1", minval=1, group="RSI Settings", tooltip="First EMA smoothing pass (reduces noise)")
+rsi_smoothing_2 = input.int(3, "RSI Smoothing EMA 2", minval=1, group="RSI Settings", tooltip="Second EMA smoothing pass (further smoothing)")
+rsi_overbought = input.float(70, "RSI Overbought", group="RSI Settings")
+rsi_oversold = input.float(30, "RSI Oversold", group="RSI Settings")
+
+// RSI Visual Settings
+show_middle_band = input.bool(false, "Show Middle Band Fill (45-55)", group="RSI Settings", tooltip="Subtle gray band in neutral zone")
+show_large_highlights = input.bool(true, "Show Large OB/OS Highlights", group="RSI Settings", tooltip="Big circles at extreme zones for instant visibility")
+
+// RSI Divergence Settings - Enhanced with Range Control
+rsi_divergence_lookback_left = input.int(5, "Divergence Lookback Left", minval=1, maxval=10, group="RSI Divergence", tooltip="Bars to left of pivot")
+rsi_divergence_lookback_right = input.int(5, "Divergence Lookback Right", minval=1, maxval=10, group="RSI Divergence", tooltip="Bars to right of pivot")
+rsi_divergence_range_min = input.int(5, "Min Divergence Range", minval=1, group="RSI Divergence", tooltip="Minimum bars between pivots (filters noise)")
+rsi_divergence_range_max = input.int(60, "Max Divergence Range", minval=10, group="RSI Divergence", tooltip="Maximum bars between pivots (filters irrelevant)")
+show_divergence_labels = input.bool(true, "Show Divergence Labels", group="RSI Divergence", tooltip="Display BULL/BEAR text at divergences")
+
+// Keltner Settings
+keltner_length = input.int(20, "Keltner EMA Length", group="Keltner Settings")
+keltner_mult = input.float(2.0, "Keltner ATR Multiplier", group="Keltner Settings")
+keltner_atr_length = input.int(10, "Keltner ATR Length", group="Keltner Settings")
+keltner_upper_threshold = input.float(70, "Upper Zone Threshold", group="Keltner Settings", tooltip="SHORT entry zone: above this %")
+keltner_lower_threshold = input.float(30, "Lower Zone Threshold", group="Keltner Settings", tooltip="LONG entry zone: below this %")
+show_keltner = input.bool(true, "Show Keltner Channels", group="Keltner Settings")
+
+// Candle Pattern Settings
+enable_candle_patterns = input.bool(true, "Enable Candle Pattern Recognition", group="Candle Patterns", tooltip="Detect Hammer, Shooting Star, Engulfing, Pin bars")
+hammer_wick_ratio = input.float(2.0, "Hammer/Shooting Star Wick Ratio", minval=1.5, group="Candle Patterns", tooltip="Lower/Upper wick must be X times larger than body")
+engulfing_min_size = input.float(1.5, "Engulfing Min Size Ratio", minval=1.0, group="Candle Patterns", tooltip="Engulfing body must be X times larger than previous")
+pin_wick_threshold = input.float(60, "Pin Bar Wick Threshold %", group="Candle Patterns", tooltip="Wick size as % of total range for pin bars")
+
+// Time Filter Settings
+enable_time_filter = input.bool(true, "Enable Time Filter", group="Time Filter")
+trading_start_hour = input.int(8, "Trading Start Hour", minval=0, maxval=23, group="Time Filter")
+trading_start_minute = input.int(0, "Trading Start Minute", minval=0, maxval=59, group="Time Filter")
+trading_end_hour = input.int(17, "Trading End Hour", minval=0, maxval=23, group="Time Filter")
+trading_end_minute = input.int(0, "Trading End Minute", minval=0, maxval=59, group="Time Filter")
+timezone_input = input.string("CET", "Timezone", options=["CET", "EST", "UTC"], group="Time Filter", tooltip="Convert times to your timezone")
+
+// Price Action Confirmation Settings
+enable_price_action = input.bool(true, "Enable Price Action Filter", group="Price Action")
+close_position_threshold = input.float(70, "Close Position Threshold %", group="Price Action", tooltip="LONG: close in upper X% of body\nSHORT: close in lower X% of body")
+wick_rejection_threshold = input.float(60, "Wick Rejection Threshold %", group="Price Action", tooltip="Wick size as % of total range")
+required_conditions = input.int(2, "Required Conditions (of 3)", minval=0, maxval=3, group="Price Action", tooltip="How many price action conditions needed\n0 = None, 1 = Weak, 2 = Balanced, 3 = Strict")
+
+// Daily Range Exhaustion Settings
+show_daily_exhaustion = input.bool(true, "Enable Daily Range Monitoring", group="Daily Range Exhaustion", tooltip="Track today's range vs Daily ATR for exhaustion detection")
+show_exhaustion_lines = input.bool(true, "Show Exhaustion Lines on Chart", group="Daily Range Exhaustion", tooltip="Visual lines showing upper/lower daily exhaustion levels")
+exhaustion_line_width = input.int(2, "Exhaustion Line Width", minval=1, maxval=5, group="Daily Range Exhaustion")
+show_exhaustion_labels = input.bool(true, "Show Exhaustion Labels", group="Daily Range Exhaustion", tooltip="Display price, distance in pips, and exhaustion risk %")
+
+// Trigger Label Settings
+show_trigger_labels = input.bool(true, "Show Trigger Labels on Chart", group="Entry Triggers", tooltip="Display TRIGGER A/B/C labels at entry points")
+trigger_label_size = input.string("small", "Trigger Label Size", options=["tiny", "small", "normal"], group="Entry Triggers")
+
+// Display Settings
+show_ema200 = input.bool(true, "Show 200 EMA (5M)", group="Display")
+table_position = input.string("top_right", "Table Position", options=["top_left", "top_center", "top_right", "middle_left", "middle_center", "middle_right", "bottom_left", "bottom_center", "bottom_right"], group="Display")
+table_text_size = input.string("small", "Table Text Size", options=["auto", "small", "normal"], group="Display")
+
+// ============================================
+// 1H BUFFER INTEGRATION - NEW IN v2.1
+// Replicates Macro_Patterns v1.2 buffer calculation logic
+// Calculates pattern invalidation buffers from 1H data
+// ============================================
+
+// Fetch all necessary 1H data for buffer calculation
+h1_close = request.security(syminfo.tickerid, "60", close, lookahead=barmerge.lookahead_off)
+h1_ema50 = request.security(syminfo.tickerid, "60", ta.ema(close, 50), lookahead=barmerge.lookahead_off)
+h1_ema100 = request.security(syminfo.tickerid, "60", ta.ema(close, 100), lookahead=barmerge.lookahead_off)
+h1_ema200 = request.security(syminfo.tickerid, "60", ta.ema(close, 200), lookahead=barmerge.lookahead_off)
+h1_atr = request.security(syminfo.tickerid, "60", ta.atr(14), lookahead=barmerge.lookahead_off)
+
+// Fetch 1H data for ADX calculation
+h1_high = request.security(syminfo.tickerid, "60", high, lookahead=barmerge.lookahead_off)
+h1_low = request.security(syminfo.tickerid, "60", low, lookahead=barmerge.lookahead_off)
+
+// Calculate ADX on 1H data (need to use ta.dmi which returns [diPlus, diMinus, adx])
+[h1_diplus, h1_diminus, h1_adx] = request.security(syminfo.tickerid, "60", ta.dmi(14, 14), lookahead=barmerge.lookahead_off)
+
+// Calculate macro trend (needed for pattern detection below)
+auto_macro_trend = h1_close > h1_ema200 ? "BULL" : "BEAR"
+
+// ============================================
+// 1H ZONE CHECK - NEW IN v2.2 (REQUIRED FOR EP PATTERNS)
+// Price must be between 50-100 EMA on 1H chart
+// ============================================
+
+// Determine if price is within 50-100 EMA zone on 1H
+h1_zone_upper = math.max(h1_ema50, h1_ema100)
+h1_zone_lower = math.min(h1_ema50, h1_ema100)
+h1_in_zone = close >= h1_zone_lower and close <= h1_zone_upper
+
+// Determine if EPL or EPS pattern is active on 1H
+// EPL: BULL trend + price in 50-100 EMA zone
+// EPS: BEAR trend + price in 50-100 EMA zone
+bool h1_epl_active = false
+bool h1_eps_active = false
+
+if h1_in_zone and auto_macro_trend == "BULL"
+    h1_epl_active := true
+else if h1_in_zone and auto_macro_trend == "BEAR"
+    h1_eps_active := true
+
+bool h1_pattern_active = h1_epl_active or h1_eps_active
+
+// ============================================
+// BUFFER CALCULATION - Replicates Macro_Patterns v1.2 logic
+// ============================================
+
+// Calculate 3 distance buffer sources (in ATR units)
+float buffer_macro_trend = na  // Distance to 200 EMA (Macro Trend break)
+float buffer_zone_exit = na     // Distance to zone boundary (50 or 100 EMA)
+float buffer_100ema = na         // Distance to 100 EMA (violation point)
+
+if h1_epl_active
+    // EPL pattern buffers
+    buffer_macro_trend := (h1_close - h1_ema200) / h1_atr  // Distance below close to 200 EMA
+    buffer_zone_exit := (h1_close - h1_ema100) / h1_atr     // Distance below close to zone exit (100 EMA)
+    buffer_100ema := (h1_close - h1_ema100) / h1_atr        // Distance to 100 EMA violation
+else if h1_eps_active
+    // EPS pattern buffers
+    buffer_macro_trend := (h1_ema200 - h1_close) / h1_atr  // Distance above close to 200 EMA
+    buffer_zone_exit := (h1_ema100 - h1_close) / h1_atr     // Distance above close to zone exit (100 EMA)
+    buffer_100ema := (h1_ema100 - h1_close) / h1_atr        // Distance to 100 EMA violation
+
+// Find minimum distance buffer (weakest/most at risk)
+float min_distance_buffer = na
+string weakest_source = ""
+float h1_critical_level = na
+
+if h1_pattern_active
+    // Start with macro trend buffer
+    min_distance_buffer := buffer_macro_trend
+    weakest_source := "Macro Trend"
+    h1_critical_level := h1_ema200
+    
+    // Check if zone exit is closer
+    if buffer_zone_exit < min_distance_buffer
+        min_distance_buffer := buffer_zone_exit
+        weakest_source := "Zone Exit"
+        h1_critical_level := h1_ema100
+    
+    // Check if 100 EMA violation is closer
+    if buffer_100ema < min_distance_buffer
+        min_distance_buffer := buffer_100ema
+        weakest_source := "100 EMA"
+        h1_critical_level := h1_ema100
+
+// Calculate time buffer (bars until ADX threshold breach)
+// Pattern weakens when ADX > 40 (trending too strongly) or ADX < 15 (not trending)
+float time_buffer_bars = na
+if h1_pattern_active
+    if h1_adx < 40
+        // Calculate bars until ADX reaches 40 (assuming ~2 ADX points per bar at current rate)
+        adx_to_threshold = 40 - h1_adx
+        time_buffer_bars := adx_to_threshold / 2  // Approximate: 2 ADX points per hour
+    else
+        time_buffer_bars := 0  // Already at threshold
+
+// Calculate overall risk rating (use worse of distance/time for conservative approach)
+string h1_risk_rating = "NONE"
+float worse_buffer = na
+
+if h1_pattern_active
+    worse_buffer := math.min(min_distance_buffer, time_buffer_bars)
+    
+    // Risk rating thresholds (same as Macro_Patterns v1.2)
+    if worse_buffer > 5.0
+        h1_risk_rating := "STRONG"
+    else if worse_buffer > 3.0
+        h1_risk_rating := "MODERATE"
+    else if worse_buffer > 2.0
+        h1_risk_rating := "WEAK"
+    else
+        h1_risk_rating := "FRAGILE"
+
+// Track if we have valid buffer data
+bool has_1h_buffer_data = h1_pattern_active and not na(h1_critical_level)
+
+// Visual elements
+string h1_break_source = weakest_source
+
+// Risk rating color mapping
+color h1_risk_color = h1_risk_rating == "STRONG" ? color.new(color.green, 20) : h1_risk_rating == "MODERATE" ? color.new(color.yellow, 20) : h1_risk_rating == "WEAK" ? color.new(color.orange, 20) : h1_risk_rating == "FRAGILE" ? color.new(color.red, 20) : color.new(color.gray, 70)
+
+// Risk rating emoji mapping
+string h1_risk_emoji = h1_risk_rating == "STRONG" ? "🟢" : h1_risk_rating == "MODERATE" ? "🟡" : h1_risk_rating == "WEAK" ? "🟠" : h1_risk_rating == "FRAGILE" ? "🔴" : "⚫"
+
+// Critical level line style
+critical_line_style = critical_line_style_input == "solid" ? line.style_solid : critical_line_style_input == "dashed" ? line.style_dashed : line.style_dotted
+
+// ============================================
+// AUTOMATIC MACRO TREND DETECTION FROM 1H
+// Replicates Macro_EP v3.0 logic: close > ema200
+// ============================================
+
+// Note: h1_close, h1_ema200, and auto_macro_trend already calculated in buffer integration section above
+
+// Final macro trend: Auto or Manual based on mode selector
+macro_trend_input = macro_mode == "Auto from 1H" ? auto_macro_trend : macro_trend_manual
+
+// ============================================
+// CALCULATIONS
+// ============================================
+
+// 200 EMA for structural reference (on 5M chart)
+ema200 = ta.ema(close, 200)
+
+// RSI Calculation - DUAL: Raw for entry logic, Smoothed for display
+rsi_raw = ta.rsi(close, rsi_length)
+rsi_smoothed = ta.ema(ta.ema(rsi_raw, rsi_smoothing_1), rsi_smoothing_2)
+
+// Keltner Channels (5M calculation)
+keltner_basis = ta.ema(close, keltner_length)
+keltner_range = ta.atr(keltner_atr_length) * keltner_mult
+keltner_upper = keltner_basis + keltner_range
+keltner_lower = keltner_basis - keltner_range
+
+// Keltner Position (0-100%)
+keltner_position = ((close - keltner_lower) / (keltner_upper - keltner_lower)) * 100
+
+// Daily Range Exhaustion Calculations
+daily_atr = request.security(syminfo.tickerid, "D", ta.atr(14), lookahead=barmerge.lookahead_off)
+daily_open = request.security(syminfo.tickerid, "D", open, lookahead=barmerge.lookahead_off)
+daily_high = request.security(syminfo.tickerid, "D", high, lookahead=barmerge.lookahead_off)
+daily_low = request.security(syminfo.tickerid, "D", low, lookahead=barmerge.lookahead_off)
+
+// Today's range metrics
+today_range = daily_high - daily_low
+upside_extension = daily_high - daily_open
+downside_extension = daily_open - daily_low
+
+// Exhaustion levels (1 ATR from open)
+upper_exhaustion = daily_open + daily_atr
+lower_exhaustion = daily_open - daily_atr
+
+// Distance from CURRENT PRICE to exhaustion (in pips)
+remaining_upside = (upper_exhaustion - close) * 10000
+remaining_downside = (close - lower_exhaustion) * 10000
+
+// Exhaustion metrics FROM OPEN (how much daily potential used/remaining)
+range_ratio = (today_range / daily_atr) * 100
+upside_used = ((daily_high - daily_open) / daily_atr) * 100
+downside_used = ((daily_open - daily_low) / daily_atr) * 100
+upside_remaining = math.max(0, 100 - upside_used)
+downside_remaining = math.max(0, 100 - downside_used)
+
+// Exhaustion Risk FROM CURRENT PRICE (for entry decisions)
+current_to_upper_exhaustion = upper_exhaustion - close
+current_to_lower_exhaustion = close - lower_exhaustion
+
+// Risk %: How much ATR distance remains from current price to exhaustion?
+upside_risk_pct = (current_to_upper_exhaustion / daily_atr) * 100
+downside_risk_pct = (current_to_lower_exhaustion / daily_atr) * 100
+
+// Time Filter Logic
+timezone_offset = timezone_input == "CET" ? 0 : timezone_input == "EST" ? -6 : -1
+current_hour = hour(time, timezone_input)
+current_minute = minute(time, timezone_input)
+
+start_minutes = trading_start_hour * 60 + trading_start_minute
+end_minutes = trading_end_hour * 60 + trading_end_minute
+current_minutes = current_hour * 60 + current_minute
+
+inside_trading_hours = not enable_time_filter or (current_minutes >= start_minutes and current_minutes <= end_minutes)
+close_to_end = enable_time_filter and (end_minutes - current_minutes <= 30 and end_minutes - current_minutes > 0)
+
+// ============================================
+// CANDLE PATTERN RECOGNITION
+// ============================================
+
+// Calculate candle metrics
+candle_body_size = math.abs(close - open)
+candle_total_range = high - low
+candle_body_percent = candle_total_range > 0 ? (candle_body_size / candle_total_range) * 100 : 0
+
+// Wick calculations
+lower_wick = math.min(open, close) - low
+upper_wick = high - math.max(open, close)
+lower_wick_percent = candle_total_range > 0 ? (lower_wick / candle_total_range) * 100 : 0
+upper_wick_percent = candle_total_range > 0 ? (upper_wick / candle_total_range) * 100 : 0
+
+// HAMMER (bullish reversal candle)
+// Requirements: Long lower wick (2x body), small upper wick, bullish or bearish body acceptable
+bullish_hammer = enable_candle_patterns and lower_wick > candle_body_size * hammer_wick_ratio and upper_wick < candle_body_size * 0.3 and candle_body_percent <= 40
+
+// SHOOTING STAR (bearish reversal candle)
+// Requirements: Long upper wick (2x body), small lower wick, bullish or bearish body acceptable
+bearish_shooting_star = enable_candle_patterns and upper_wick > candle_body_size * hammer_wick_ratio and lower_wick < candle_body_size * 0.3 and candle_body_percent <= 40
+
+// BULLISH ENGULFING
+// Requirements: Bullish body engulfs previous bearish body, must be significantly larger
+prev_body_size = math.abs(close[1] - open[1])
+bullish_engulfing = enable_candle_patterns and close > open and close[1] < open[1] and close > open[1] and open < close[1] and candle_body_size > prev_body_size * engulfing_min_size
+
+// BEARISH ENGULFING
+// Requirements: Bearish body engulfs previous bullish body, must be significantly larger
+bearish_engulfing = enable_candle_patterns and close < open and close[1] > open[1] and close < open[1] and open > close[1] and candle_body_size > prev_body_size * engulfing_min_size
+
+// PIN BAR (rejection candles with long wicks)
+// Bullish pin: Long lower wick showing rejection of lows
+bullish_pin = enable_candle_patterns and lower_wick_percent >= pin_wick_threshold and candle_body_percent <= 40
+
+// Bearish pin: Long upper wick showing rejection of highs
+bearish_pin = enable_candle_patterns and upper_wick_percent >= pin_wick_threshold and candle_body_percent <= 40
+
+// Combined reversal candle flags for trigger logic
+has_bullish_reversal_candle = bullish_hammer or bullish_engulfing or bullish_pin
+has_bearish_reversal_candle = bearish_shooting_star or bearish_engulfing or bearish_pin
+
+// ============================================
+// CANDLE PATTERN TRACKING - NEW IN v2.2
+// Track which specific pattern triggered for alert message
+// ============================================
+
+var string active_bullish_pattern = ""
+var string active_bearish_pattern = ""
+
+if has_bullish_reversal_candle
+    if bullish_hammer
+        active_bullish_pattern := "Hammer"
+    else if bullish_engulfing
+        active_bullish_pattern := "Bullish Engulfing"
+    else if bullish_pin
+        active_bullish_pattern := "Bullish Pin"
+else
+    active_bullish_pattern := ""
+
+if has_bearish_reversal_candle
+    if bearish_shooting_star
+        active_bearish_pattern := "Shooting Star"
+    else if bearish_engulfing
+        active_bearish_pattern := "Bearish Engulfing"
+    else if bearish_pin
+        active_bearish_pattern := "Bearish Pin"
+else
+    active_bearish_pattern := ""
+
+// ============================================
+// ENHANCED RSI DIVERGENCE DETECTION
+// Range-controlled with labels
+// ============================================
+
+// Find RSI pivots (using RAW RSI for accurate pivot detection)
+rsi_pivot_high = ta.pivothigh(rsi_raw, rsi_divergence_lookback_left, rsi_divergence_lookback_right)
+rsi_pivot_low = ta.pivotlow(rsi_raw, rsi_divergence_lookback_left, rsi_divergence_lookback_right)
+
+// Find price pivots
+price_pivot_high = ta.pivothigh(high, rsi_divergence_lookback_left, rsi_divergence_lookback_right)
+price_pivot_low = ta.pivotlow(low, rsi_divergence_lookback_left, rsi_divergence_lookback_right)
+
+// Track last pivots for divergence comparison
+var float last_rsi_high = na
+var float last_rsi_low = na
+var float last_price_high = na
+var float last_price_low = na
+var int last_rsi_high_bar = na
+var int last_rsi_low_bar = na
+
+// Divergence flags
+var bool bullish_divergence = false
+var bool bearish_divergence = false
+var bool hidden_bull_div = false
+var bool hidden_bear_div = false
+
+// Bullish Divergence Detection (with range control)
+if not na(rsi_pivot_low) and not na(price_pivot_low)
+    curr_rsi_low = rsi_pivot_low
+    curr_price_low = price_pivot_low
+    curr_bar = bar_index - rsi_divergence_lookback_right
+    
+    if not na(last_rsi_low) and not na(last_price_low)
+        bars_between = curr_bar - last_rsi_low_bar
+        
+        // Regular Bullish: Price lower low + RSI higher low (REVERSAL)
+        if curr_price_low < last_price_low and curr_rsi_low > last_rsi_low and bars_between >= rsi_divergence_range_min and bars_between <= rsi_divergence_range_max
+            bullish_divergence := true
+            // Draw divergence line
+            line.new(last_rsi_low_bar, last_rsi_low, curr_bar, curr_rsi_low, color=color.new(color.lime, 20), width=2, style=line.style_dashed)
+            // Add label if enabled
+            if show_divergence_labels
+                label.new(curr_bar, rsi_raw[rsi_divergence_lookback_right], 'BULL', color=color.new(color.green, 0), textcolor=color.white, style=label.style_label_up, size=size.small)
+        
+        // Hidden Bullish: Price higher low + RSI lower low (CONTINUATION)
+        else if curr_price_low > last_price_low and curr_rsi_low < last_rsi_low and bars_between >= rsi_divergence_range_min and bars_between <= rsi_divergence_range_max
+            hidden_bull_div := true
+            // Draw divergence line (lighter)
+            line.new(last_rsi_low_bar, last_rsi_low, curr_bar, curr_rsi_low, color=color.new(color.lime, 50), width=2, style=line.style_dashed)
+            // Add label if enabled
+            if show_divergence_labels
+                label.new(curr_bar, rsi_raw[rsi_divergence_lookback_right], 'H-BULL', color=color.new(color.green, 30), textcolor=color.white, style=label.style_label_up, size=size.tiny)
+        else
+            bullish_divergence := false
+            hidden_bull_div := false
+    
+    last_rsi_low := curr_rsi_low
+    last_price_low := curr_price_low
+    last_rsi_low_bar := curr_bar
+
+// Bearish Divergence Detection (with range control)
+if not na(rsi_pivot_high) and not na(price_pivot_high)
+    curr_rsi_high = rsi_pivot_high
+    curr_price_high = price_pivot_high
+    curr_bar = bar_index - rsi_divergence_lookback_right
+    
+    if not na(last_rsi_high) and not na(last_price_high)
+        bars_between = curr_bar - last_rsi_high_bar
+        
+        // Regular Bearish: Price higher high + RSI lower high (REVERSAL)
+        if curr_price_high > last_price_high and curr_rsi_high < last_rsi_high and bars_between >= rsi_divergence_range_min and bars_between <= rsi_divergence_range_max
+            bearish_divergence := true
+            // Draw divergence line
+            line.new(last_rsi_high_bar, last_rsi_high, curr_bar, curr_rsi_high, color=color.new(color.red, 20), width=2, style=line.style_dashed)
+            // Add label if enabled
+            if show_divergence_labels
+                label.new(curr_bar, rsi_raw[rsi_divergence_lookback_right], 'BEAR', color=color.new(color.red, 0), textcolor=color.white, style=label.style_label_down, size=size.small)
+        
+        // Hidden Bearish: Price lower high + RSI higher high (CONTINUATION)
+        else if curr_price_high < last_price_high and curr_rsi_high > last_rsi_high and bars_between >= rsi_divergence_range_min and bars_between <= rsi_divergence_range_max
+            hidden_bear_div := true
+            // Draw divergence line (lighter)
+            line.new(last_rsi_high_bar, last_rsi_high, curr_bar, curr_rsi_high, color=color.new(color.red, 50), width=2, style=line.style_dashed)
+            // Add label if enabled
+            if show_divergence_labels
+                label.new(curr_bar, rsi_raw[rsi_divergence_lookback_right], 'H-BEAR', color=color.new(color.red, 30), textcolor=color.white, style=label.style_label_down, size=size.tiny)
+        else
+            bearish_divergence := false
+            hidden_bear_div := false
+    
+    last_rsi_high := curr_rsi_high
+    last_price_high := curr_price_high
+    last_rsi_high_bar := curr_bar
+
+// Combined divergence flags
+has_bullish_divergence = bullish_divergence or hidden_bull_div
+has_bearish_divergence = bearish_divergence or hidden_bear_div
+
+// ============================================
+// TIER 1: REQUIRED CONDITIONS
+// Uses RAW RSI for accurate threshold detection
+// ENHANCED IN v2.2: Added 1H zone check as REQUIRED
+// ============================================
+
+// Macro alignment check (works with both auto and manual modes)
+macro_allows_long = macro_trend_input == "BULL" or macro_trend_input == "SHOW ALL"
+macro_allows_short = macro_trend_input == "BEAR" or macro_trend_input == "SHOW ALL"
+
+// RSI in zone (using RAW RSI - no lag)
+rsi_in_oversold = rsi_raw < rsi_oversold
+rsi_in_overbought = rsi_raw > rsi_overbought
+
+// Keltner position in zone
+in_lower_zone = keltner_position <= keltner_lower_threshold
+in_upper_zone = keltner_position >= keltner_upper_threshold
+
+// TIER 1 conditions for LONG - UPDATED WITH 1H ZONE CHECK
+tier1_long = macro_allows_long and inside_trading_hours and rsi_in_oversold and in_lower_zone and h1_in_zone
+
+// TIER 1 conditions for SHORT - UPDATED WITH 1H ZONE CHECK
+tier1_short = macro_allows_short and inside_trading_hours and rsi_in_overbought and in_upper_zone and h1_in_zone
+
+// ============================================
+// TIER 2: PRICE ACTION CONFIRMATION (2 of 3)
+// ============================================
+
+// Condition A: Close Position
+close_position_in_body = candle_body_size > 0 ? ((close - math.min(open, close)) / candle_body_size) * 100 : 50
+long_close_position = close > open and close_position_in_body >= close_position_threshold
+short_close_position = close < open and close_position_in_body <= (100 - close_position_threshold)
+
+// Condition B: Momentum Breakout
+long_momentum_breakout = close > high[1]
+short_momentum_breakout = close < low[1]
+
+// Condition C: Wick Rejection
+long_wick_rejection = lower_wick_percent >= wick_rejection_threshold
+short_wick_rejection = upper_wick_percent >= wick_rejection_threshold
+
+// Count conditions met
+long_conditions_met = (long_close_position ? 1 : 0) + (long_momentum_breakout ? 1 : 0) + (long_wick_rejection ? 1 : 0)
+short_conditions_met = (short_close_position ? 1 : 0) + (short_momentum_breakout ? 1 : 0) + (short_wick_rejection ? 1 : 0)
+
+// TIER 2 passed if price action disabled OR enough conditions met
+tier2_long = not enable_price_action or long_conditions_met >= required_conditions
+tier2_short = not enable_price_action or short_conditions_met >= required_conditions
+
+// ============================================
+// ENTRY TRIGGERS - PATTERN LIBRARY v1.9 ALIGNED
+// ============================================
+
+// TRIGGER A: Oversold Bounce / Overbought Reversal
+// EPL: RSI < 30 + Lower Keltner zone + Reversal candle (hammer/pin) + 1H zone
+// EPS: RSI > 70 + Upper Keltner zone + Reversal candle (shooting star/pin) + 1H zone
+trigger_a_long = tier1_long and tier2_long and has_bullish_reversal_candle and not has_bullish_divergence
+trigger_a_short = tier1_short and tier2_short and has_bearish_reversal_candle and not has_bearish_divergence
+
+// TRIGGER B: Divergence
+// EPL: Bullish divergence (regular or hidden) + Price action confirmation
+// EPS: Bearish divergence (regular or hidden) + Price action confirmation
+trigger_b_long = tier1_long and tier2_long and has_bullish_divergence
+trigger_b_short = tier1_short and tier2_short and has_bearish_divergence
+
+// TRIGGER C: Momentum Reversal
+// EPL: Strong bullish candle (>50% body) + Momentum breakout (close > high[1])
+// EPS: Strong bearish candle (>50% body) + Momentum breakdown (close < low[1])
+trigger_c_long = tier1_long and long_momentum_breakout and candle_body_percent > 50 and close > open and not has_bullish_divergence and not has_bullish_reversal_candle
+trigger_c_short = tier1_short and short_momentum_breakout and candle_body_percent > 50 and close < open and not has_bearish_divergence and not has_bearish_reversal_candle
+
+// EDUCATIONAL: Weak signals (SHOW ALL mode only)
+// Basic conditions met but no specific trigger confirmed
+weak_long_signal = tier1_long and not trigger_a_long and not trigger_b_long and not trigger_c_long and macro_trend_input == "SHOW ALL"
+weak_short_signal = tier1_short and not trigger_a_short and not trigger_b_short and not trigger_c_short and macro_trend_input == "SHOW ALL"
+
+// Final trigger flags (confirmed on NEXT bar to avoid repainting)
+plot_trigger_a_long = trigger_a_long[1]
+plot_trigger_a_short = trigger_a_short[1]
+plot_trigger_b_long = trigger_b_long[1]
+plot_trigger_b_short = trigger_b_short[1]
+plot_trigger_c_long = trigger_c_long[1]
+plot_trigger_c_short = trigger_c_short[1]
+plot_weak_long = weak_long_signal[1]
+plot_weak_short = weak_short_signal[1]
+
+// ============================================
+// ALERT CONDITIONS - NEW IN v2.2
+// Fire on bar close only using alert() function
+// ============================================
+
+// Build alert messages per specification format:
+// "[PATTERN] [TRIGGER]: [Action] at [Price] | RSI=[value] | [candle_pattern_name] | Room=[X]%"
+
+// EPL Trigger A Alert
+if trigger_a_long
+    alert(syminfo.ticker + " - EPL TRIGGER A: Oversold bounce at " + str.tostring(close, format.mintick) + " | RSI=" + str.tostring(math.round(rsi_raw, 1)) + " | " + active_bullish_pattern + " | Upside=" + str.tostring(math.round(upside_risk_pct, 0)) + "%", alert.freq_once_per_bar_close)
+
+// EPS Trigger A Alert
+if trigger_a_short
+    alert(syminfo.ticker + " - EPS TRIGGER A: Overbought reversal at " + str.tostring(close, format.mintick) + " | RSI=" + str.tostring(math.round(rsi_raw, 1)) + " | " + active_bearish_pattern + " | Downside=" + str.tostring(math.round(downside_risk_pct, 0)) + "%", alert.freq_once_per_bar_close)
+
+// ============================================
+// SIGNAL SUMMARY FOR TABLE
+// ============================================
+
+var string current_signal = "WAIT"
+var string trigger_type = ""
+var color signal_color = color.gray
+
+// Determine active trigger and signal
+if trigger_a_long
+    current_signal := "TRIGGER A"
+    trigger_type := "Oversold Bounce"
+    signal_color := color.new(color.green, 20)
+else if trigger_a_short
+    current_signal := "TRIGGER A"
+    trigger_type := "Overbought Reversal"
+    signal_color := color.new(color.red, 20)
+else if trigger_b_long
+    current_signal := "TRIGGER B"
+    trigger_type := "Bull Divergence"
+    signal_color := color.new(color.green, 20)
+else if trigger_b_short
+    current_signal := "TRIGGER B"
+    trigger_type := "Bear Divergence"
+    signal_color := color.new(color.red, 20)
+else if trigger_c_long
+    current_signal := "TRIGGER C"
+    trigger_type := "Momentum Long"
+    signal_color := color.new(color.green, 30)
+else if trigger_c_short
+    current_signal := "TRIGGER C"
+    trigger_type := "Momentum Short"
+    signal_color := color.new(color.red, 30)
+else if weak_long_signal
+    current_signal := "WEAK LONG"
+    trigger_type := "Basic Only"
+    signal_color := color.new(color.orange, 50)
+else if weak_short_signal
+    current_signal := "WEAK SHORT"
+    trigger_type := "Basic Only"
+    signal_color := color.new(color.orange, 50)
+else if not inside_trading_hours
+    current_signal := "WAIT"
+    trigger_type := "Outside Hours"
+    signal_color := color.new(color.red, 30)
+else
+    current_signal := "WAIT"
+    trigger_type := "No Setup"
+    signal_color := color.new(color.gray, 70)
+
+// ============================================
+// PLOTTING - ENHANCED RSI INDICATOR PANE
+// ============================================
+
+// 4-Zone RSI Color Coding (using smoothed RSI for display)
+rsi_color = rsi_smoothed >= rsi_overbought ? color.new(color.olive, 0) : rsi_smoothed <= rsi_oversold ? color.new(color.maroon, 0) : rsi_smoothed > rsi_oversold and rsi_smoothed <= 50 ? color.new(color.red, 0) : color.new(color.green, 0)
+
+// RSI plot with CIRCLE style and 4-zone colors
+plot(rsi_smoothed, color=rsi_color, linewidth=3, title="Smoothed RSI", style=plot.style_circles)
+
+// Reference lines
+hline(rsi_overbought, "Overbought", color=color.new(color.gray, 50), linestyle=hline.style_dashed)
+hline(50, "Midline", color=color.new(color.gray, 70), linestyle=hline.style_solid)
+hline(rsi_oversold, "Oversold", color=color.new(color.gray, 50), linestyle=hline.style_dashed)
+
+// LARGE OB/OS HIGHLIGHTS (instant visual identification)
+plot(show_large_highlights and rsi_smoothed > rsi_overbought ? rsi_smoothed : na, color=color.new(color.olive, 50), style=plot.style_circles, linewidth=20, title="OB Highlight")
+plot(show_large_highlights and rsi_smoothed < rsi_oversold ? rsi_smoothed : na, color=color.new(color.maroon, 50), style=plot.style_circles, linewidth=20, title="OS Highlight")
+
+// MIDDLE BAND FILL (45-55 neutral zone) - Optional
+mid_upper = hline(55, 'RSI Middle Band U', color=color.new(color.gray, 50), linestyle=hline.style_solid, linewidth=2, display=display.none)
+mid_lower = hline(45, 'RSI Middle Band L', color=color.new(color.gray, 50), linestyle=hline.style_solid, linewidth=2, display=display.none)
+fill(mid_upper, mid_lower, show_middle_band ? color.new(color.silver, 80) : na, title="Middle Band Fill")
+
+// ============================================
+// DAILY EXHAUSTION LINES ON PRICE CHART
+// Color based on Exhaustion Risk % (from current price)
+// ============================================
+
+// Determine line colors based on exhaustion risk percentage
+upper_line_color = upside_risk_pct > 50 ? color.new(color.green, 0) : upside_risk_pct > 20 ? color.new(color.yellow, 0) : upside_risk_pct > 10 ? color.new(color.orange, 0) : color.new(color.red, 0)
+upper_line_style = upside_risk_pct < 20 ? line.style_solid : line.style_dashed
+
+lower_line_color = downside_risk_pct > 50 ? color.new(color.green, 0) : downside_risk_pct > 20 ? color.new(color.yellow, 0) : downside_risk_pct > 10 ? color.new(color.orange, 0) : color.new(color.red, 0)
+lower_line_style = downside_risk_pct < 20 ? line.style_solid : line.style_dashed
+
+// Delete old lines and labels
+var line upper_line = na
+var line lower_line = na
+var label upper_label = na
+var label lower_label = na
+
+if show_exhaustion_lines and show_daily_exhaustion
+    // Delete previous lines
+    line.delete(upper_line)
+    line.delete(lower_line)
+    label.delete(upper_label)
+    label.delete(lower_label)
+    
+    // Draw new lines (bar_index - 10 to bar_index + 5)
+    upper_line := line.new(bar_index - 10, upper_exhaustion, bar_index + 5, upper_exhaustion, color=upper_line_color, width=exhaustion_line_width, style=upper_line_style, force_overlay=true)
+    lower_line := line.new(bar_index - 10, lower_exhaustion, bar_index + 5, lower_exhaustion, color=lower_line_color, width=exhaustion_line_width, style=lower_line_style, force_overlay=true)
+    
+    // Enhanced labels: Price | Distance in pips | Exhaustion Risk %
+    if show_exhaustion_labels
+        // Upper label: Shows distance from current price + risk assessment
+        upper_label_text = str.tostring(upper_exhaustion, "#.#####") + " | " + str.tostring(math.round(remaining_upside)) + "p | Risk: " + str.tostring(math.round(upside_risk_pct, 0)) + "%"
+        upper_label := label.new(bar_index + 5, upper_exhaustion, upper_label_text, style=label.style_label_left, color=upper_line_color, textcolor=color.white, size=size.small, force_overlay=true)
+        
+        // Lower label: Shows distance from current price + risk assessment
+        lower_label_text = str.tostring(lower_exhaustion, "#.#####") + " | " + str.tostring(math.round(remaining_downside)) + "p | Risk: " + str.tostring(math.round(downside_risk_pct, 0)) + "%"
+        lower_label := label.new(bar_index + 5, lower_exhaustion, lower_label_text, style=label.style_label_left, color=lower_line_color, textcolor=color.white, size=size.small, force_overlay=true)
+
+// ============================================
+// 1H CRITICAL LEVEL LINE - NEW IN v2.1
+// ============================================
+
+var line critical_level_line = na
+
+if show_critical_line and enable_1h_critical_level and has_1h_buffer_data
+    line.delete(critical_level_line)
+    critical_level_line := line.new(bar_index - 10, h1_critical_level, bar_index + 10, h1_critical_level, color=color.new(color.red, 0), width=2, style=critical_line_style, force_overlay=true)
+
+// ============================================
+// OVERLAYS ON PRICE CHART
+// ============================================
+
+// 200 EMA (5M timeframe)
+plot(show_ema200 ? ema200 : na, color=color.new(color.white, 0), linewidth=2, title="200 EMA (5M)", force_overlay=true)
+
+// Keltner Channels
+keltner_upper_plot = plot(show_keltner ? keltner_upper : na, color=color.new(color.fuchsia, 0), linewidth=1, title="Keltner Upper", display=display.none, force_overlay=true)
+keltner_lower_plot = plot(show_keltner ? keltner_lower : na, color=color.new(color.fuchsia, 0), linewidth=1, title="Keltner Lower", display=display.none, force_overlay=true)
+fill(keltner_upper_plot, keltner_lower_plot, color=show_keltner ? color.new(color.fuchsia, 70) : na, title="Keltner Fill")
+plot(show_keltner ? keltner_basis : na, color=color.new(color.fuchsia, 30), linewidth=1, title="Keltner Basis", style=plot.style_circles, force_overlay=true)
+
+// ============================================
+// ENTRY ARROWS AND TRIGGER LABELS
+// ============================================
+
+// Convert trigger_label_size string to size constant
+label_size_const = trigger_label_size == "tiny" ? size.tiny : trigger_label_size == "small" ? size.small : size.normal
+
+// TRIGGER A: Oversold Bounce / Overbought Reversal
+plotshape(plot_trigger_a_long, style=shape.triangleup, location=location.belowbar, color=color.new(color.green, 0), size=size.small, title="Trigger A Long", force_overlay=true)
+plotshape(plot_trigger_a_short, style=shape.triangledown, location=location.abovebar, color=color.new(color.red, 0), size=size.small, title="Trigger A Short", force_overlay=true)
+
+if show_trigger_labels and plot_trigger_a_long
+    label.new(bar_index, low, "TRIGGER A\nOversold Bounce", color=color.new(color.green, 0), textcolor=color.white, style=label.style_label_up, size=label_size_const, force_overlay=true)
+if show_trigger_labels and plot_trigger_a_short
+    label.new(bar_index, high, "TRIGGER A\nOverbought Reversal", color=color.new(color.red, 0), textcolor=color.white, style=label.style_label_down, size=label_size_const, force_overlay=true)
+
+// TRIGGER B: Divergence
+plotshape(plot_trigger_b_long, style=shape.triangleup, location=location.belowbar, color=color.new(color.lime, 0), size=size.normal, title="Trigger B Long", force_overlay=true)
+plotshape(plot_trigger_b_short, style=shape.triangledown, location=location.abovebar, color=color.new(color.maroon, 0), size=size.normal, title="Trigger B Short", force_overlay=true)
+
+if show_trigger_labels and plot_trigger_b_long
+    label.new(bar_index, low, "TRIGGER B\nBull Divergence", color=color.new(color.lime, 0), textcolor=color.black, style=label.style_label_up, size=label_size_const, force_overlay=true)
+if show_trigger_labels and plot_trigger_b_short
+    label.new(bar_index, high, "TRIGGER B\nBear Divergence", color=color.new(color.maroon, 0), textcolor=color.white, style=label.style_label_down, size=label_size_const, force_overlay=true)
+
+// TRIGGER C: Momentum Reversal
+plotshape(plot_trigger_c_long, style=shape.triangleup, location=location.belowbar, color=color.new(color.aqua, 0), size=size.small, title="Trigger C Long", force_overlay=true)
+plotshape(plot_trigger_c_short, style=shape.triangledown, location=location.abovebar, color=color.new(color.orange, 0), size=size.small, title="Trigger C Short", force_overlay=true)
+
+if show_trigger_labels and plot_trigger_c_long
+    label.new(bar_index, low, "TRIGGER C\nMomentum Long", color=color.new(color.aqua, 0), textcolor=color.black, style=label.style_label_up, size=label_size_const, force_overlay=true)
+if show_trigger_labels and plot_trigger_c_short
+    label.new(bar_index, high, "TRIGGER C\nMomentum Short", color=color.new(color.orange, 0), textcolor=color.black, style=label.style_label_down, size=label_size_const, force_overlay=true)
+
+// WEAK signals (SHOW ALL mode only)
+plotshape(plot_weak_long, style=shape.triangleup, location=location.belowbar, color=color.new(color.yellow, 50), size=size.tiny, title="Weak Long", force_overlay=true)
+plotshape(plot_weak_short, style=shape.triangledown, location=location.abovebar, color=color.new(color.yellow, 50), size=size.tiny, title="Weak Short", force_overlay=true)
+
+// ============================================
+// TABLE - ENHANCED WITH 1H BUFFER ROWS (9 ROWS)
+// ============================================
+
+table_pos = table_position == "top_left" ? position.top_left : table_position == "top_center" ? position.top_center : table_position == "top_right" ? position.top_right : table_position == "middle_left" ? position.middle_left : table_position == "middle_center" ? position.middle_center : table_position == "middle_right" ? position.middle_right : table_position == "bottom_left" ? position.bottom_left : table_position == "bottom_center" ? position.bottom_center : position.bottom_right
+
+text_size_header = table_text_size == "auto" ? size.auto : table_text_size == "small" ? size.small : size.normal
+text_size_cells = table_text_size == "auto" ? size.auto : table_text_size == "small" ? size.small : size.normal
+
+var table micro_table = table.new(table_pos, 2, 9, border_width=2, force_overlay=true)
+
+if barstate.islast and show_daily_exhaustion
+    // ROW 0: MACRO ALIGNMENT
+    macro_align_color = macro_trend_input == "BULL" ? color.new(color.green, 30) : macro_trend_input == "BEAR" ? color.new(color.red, 30) : macro_trend_input == "NEUTRAL" ? color.new(color.gray, 30) : color.new(color.blue, 30)
+    
+    var string macro_display_text = ""
+    
+    if macro_mode == "Auto from 1H"
+        macro_display_text := macro_trend_input + " (Auto 1H)\nFilter: " + (macro_trend_input == "BULL" ? "LONGS ONLY" : "SHORTS ONLY")
+    else
+        macro_filter_text = macro_trend_input == "BULL" ? "LONGS ONLY" : macro_trend_input == "BEAR" ? "SHORTS ONLY" : macro_trend_input == "NEUTRAL" ? "NO TRADES" : "SHOW ALL"
+        macro_display_text := macro_trend_input + "\nFilter: " + macro_filter_text
+    
+    macro_tooltip = macro_mode == "Auto from 1H" ? "Automatic detection from 1H Macro_EP\n1H Close: " + str.tostring(h1_close, "#.#####") + "\n1H EMA 200: " + str.tostring(h1_ema200, "#.#####") + "\nLogic: close > ema200 = BULL" : "Manual override mode\nSet in indicator settings"
+    
+    table.cell(micro_table, 0, 0, "MACRO ALIGN", text_color=color.white, bgcolor=color.new(color.gray, 20), text_size=text_size_header)
+    table.cell(micro_table, 1, 0, macro_display_text, text_color=color.white, bgcolor=macro_align_color, text_size=text_size_header, tooltip=macro_tooltip)
+    
+    // ROW 1: 1H RISK RATING - NEW IN v2.1
+    if enable_1h_risk_display and has_1h_buffer_data
+        risk_display_text = h1_risk_emoji + " " + h1_risk_rating
+        risk_tooltip = "Risk rating from 1H buffer system\nReplicates Macro_Patterns v1.2 calculation\n\n🟢 STRONG: >5 ATR/bars buffer\n🟡 MODERATE: 3-5 ATR/bars buffer\n🟠 WEAK: 2-3 ATR/bars buffer\n🔴 FRAGILE: <2 ATR/bars buffer\n\nCalculated from:\n- Distance to Macro Trend (200 EMA)\n- Distance to Zone Exit (100 EMA)\n- ADX threshold (40) bars remaining\n\nRating uses WORSE of distance/time (conservative)"
+        table.cell(micro_table, 0, 1, "1H Risk", text_color=color.white, bgcolor=color.new(color.gray, 50), text_size=text_size_cells, tooltip=risk_tooltip)
+        table.cell(micro_table, 1, 1, risk_display_text, text_color=color.white, bgcolor=h1_risk_color, text_size=text_size_cells)
+    else
+        table.cell(micro_table, 0, 1, "1H Risk", text_color=color.white, bgcolor=color.new(color.gray, 50), text_size=text_size_cells)
+        table.cell(micro_table, 1, 1, "---", text_color=color.white, bgcolor=color.new(color.gray, 80), text_size=text_size_cells)
+    
+    // ROW 2: 1H CRITICAL LEVEL - NEW IN v2.1
+    if enable_1h_critical_level and has_1h_buffer_data
+        critical_display_text = "❌ " + str.tostring(h1_critical_level, "#.#####") + "\n(" + h1_break_source + ")"
+        critical_tooltip = "Pattern invalidation level (weakest buffer)\n\nShows price of closest failure point from:\n- Macro Trend: 200 EMA break\n- Zone Exit: 100 EMA break (leaving zone)\n- 100 EMA: Violation during pullback\n\nUse for:\n- Stop loss placement (place below/above with buffer)\n- KO certificate leverage selection (calculate distance)\n- Real-time risk monitoring during trade"
+        table.cell(micro_table, 0, 2, "1H Critical", text_color=color.white, bgcolor=color.new(color.gray, 50), text_size=text_size_cells, tooltip=critical_tooltip)
+        table.cell(micro_table, 1, 2, critical_display_text, text_color=color.white, bgcolor=color.new(color.red, 80), text_size=text_size_cells)
+    else
+        table.cell(micro_table, 0, 2, "1H Critical", text_color=color.white, bgcolor=color.new(color.gray, 50), text_size=text_size_cells)
+        table.cell(micro_table, 1, 2, "---", text_color=color.white, bgcolor=color.new(color.gray, 80), text_size=text_size_cells)
+    
+    // ROW 3: MICRO RSI
+    rsi_zone_text = rsi_raw > rsi_overbought ? "OVERBOUGHT" : rsi_raw < rsi_oversold ? "OVERSOLD" : "NEUTRAL"
+    rsi_zone_color = rsi_raw > rsi_overbought ? color.new(color.red, 30) : rsi_raw < rsi_oversold ? color.new(color.green, 30) : color.new(color.gray, 70)
+    
+    rsi_display_text = str.tostring(math.round(rsi_smoothed, 1)) + "\n" + rsi_zone_text
+    
+    table.cell(micro_table, 0, 3, "MICRO RSI", text_color=color.white, bgcolor=color.new(color.gray, 50), text_size=text_size_cells, tooltip="Smoothed: " + str.tostring(math.round(rsi_smoothed, 1)) + "\nRaw: " + str.tostring(math.round(rsi_raw, 1)) + "\nEntry logic uses RAW, display uses SMOOTHED")
+    table.cell(micro_table, 1, 3, rsi_display_text, text_color=color.white, bgcolor=rsi_zone_color, text_size=text_size_cells)
+    
+    // ROW 4: RSI DIVERGENCE
+    var string div_text = "NONE"
+    var color div_color = color.gray
+    
+    if bullish_divergence
+        div_text := "BULLISH DIV"
+        div_color := color.new(color.green, 40)
+    else if bearish_divergence
+        div_text := "BEARISH DIV"
+        div_color := color.new(color.red, 40)
+    else if hidden_bull_div
+        div_text := "HIDDEN BULL"
+        div_color := color.new(color.green, 60)
+    else if hidden_bear_div
+        div_text := "HIDDEN BEAR"
+        div_color := color.new(color.red, 60)
+    else
+        div_text := "NONE"
+        div_color := color.new(color.gray, 70)
+    
+    table.cell(micro_table, 0, 4, "RSI DIVERGENCE", text_color=color.white, bgcolor=color.new(color.gray, 50), text_size=text_size_cells, tooltip="Regular: Reversal signal\nHidden: Continuation signal\nRange: " + str.tostring(rsi_divergence_range_min) + "-" + str.tostring(rsi_divergence_range_max) + " bars")
+    table.cell(micro_table, 1, 4, div_text, text_color=color.white, bgcolor=div_color, text_size=text_size_cells)
+    
+    // ROW 5: ENTRY SIGNAL WITH TRIGGER TYPE
+    signal_display = current_signal + "\n" + trigger_type
+    
+    trigger_tooltip = "TRIGGER A: Oversold/Overbought + Reversal Candle\nTRIGGER B: Divergence + Price Confirmation\nTRIGGER C: Momentum Breakout\nWEAK: Basic conditions only (SHOW ALL mode)\nWAIT: No setup or outside trading hours"
+    
+    table.cell(micro_table, 0, 5, "ENTRY SIGNAL", text_color=color.white, bgcolor=color.new(color.gray, 50), text_size=text_size_cells, tooltip=trigger_tooltip)
+    table.cell(micro_table, 1, 5, signal_display, text_color=color.white, bgcolor=signal_color, text_size=text_size_cells)
+    
+    // ROW 6: KELTNER POSITION
+    keltner_zone_text = keltner_position >= keltner_upper_threshold ? "UPPER ZONE" : keltner_position <= keltner_lower_threshold ? "LOWER ZONE" : "MIDDLE ZONE"
+    keltner_zone_color = keltner_position >= keltner_upper_threshold ? color.new(color.red, 30) : keltner_position <= keltner_lower_threshold ? color.new(color.green, 30) : color.new(color.gray, 70)
+    
+    keltner_display_text = str.tostring(math.round(keltner_position, 0)) + "%\n" + keltner_zone_text
+    
+    table.cell(micro_table, 0, 6, "KELTNER POS", text_color=color.white, bgcolor=color.new(color.gray, 50), text_size=text_size_cells, tooltip="UPPER (>70%): SHORT entry zone\nMIDDLE (30-70%): Neutral\nLOWER (<30%): LONG entry zone")
+    table.cell(micro_table, 1, 6, keltner_display_text, text_color=color.white, bgcolor=keltner_zone_color, text_size=text_size_cells)
+    
+    // ROW 7: TRADING HOURS
+    var string hours_text = ""
+    var color hours_color = color.gray
+    
+    if not enable_time_filter
+        hours_text := "DISABLED"
+        hours_color := color.new(color.gray, 70)
+    else if inside_trading_hours and not close_to_end
+        hours_text := "ACTIVE\nTrading"
+        hours_color := color.new(color.green, 30)
+    else if close_to_end
+        hours_text := "ACTIVE\n30min warning"
+        hours_color := color.new(color.orange, 50)
+    else
+        hours_text := "CLOSED\nOutside hours"
+        hours_color := color.new(color.red, 30)
+    
+    table.cell(micro_table, 0, 7, "TRADING HOURS", text_color=color.white, bgcolor=color.new(color.gray, 50), text_size=text_size_cells, tooltip="Active trading session\nDefault: 08:00-17:00 " + timezone_input)
+    table.cell(micro_table, 1, 7, hours_text, text_color=color.white, bgcolor=hours_color, text_size=text_size_cells)
+    
+    // ROW 8: DAILY RANGE
+    range_line1 = str.tostring(math.round(today_range * 10000)) + "/" + str.tostring(math.round(daily_atr * 10000)) + "p (" + str.tostring(math.round(range_ratio, 0)) + "%)"
+    range_line2 = "Risk: ↑" + str.tostring(math.round(upside_risk_pct, 0)) + "% ↓" + str.tostring(math.round(downside_risk_pct, 0)) + "%"
+    range_status_text = range_line1 + "\n" + range_line2
+    
+    // Color based on WORST exhaustion risk (most limiting direction)
+    worst_risk = math.min(upside_risk_pct, downside_risk_pct)
+    range_status_color = worst_risk > 50 ? color.new(color.green, 30) : worst_risk > 20 ? color.new(color.yellow, 50) : worst_risk > 10 ? color.new(color.orange, 50) : color.new(color.red, 30)
+    
+    range_tooltip = "TODAY'S METRICS:\nRange: " + str.tostring(math.round(today_range * 10000)) + " pips\nDaily ATR(14): " + str.tostring(math.round(daily_atr * 10000)) + " pips\nRange Used: " + str.tostring(math.round(range_ratio, 0)) + "%\n\nFROM OPEN:\nUpside: " + str.tostring(math.round(upside_extension * 10000)) + "p (" + str.tostring(math.round(upside_used, 0)) + "% used)\nDownside: " + str.tostring(math.round(math.abs(downside_extension) * 10000)) + "p (" + str.tostring(math.round(downside_used, 0)) + "% used)\n\nEXHAUSTION RISK (from current):\nUpside Risk: " + str.tostring(math.round(upside_risk_pct, 0)) + "% (" + str.tostring(math.round(remaining_upside)) + "p to exhaustion)\nDownside Risk: " + str.tostring(math.round(downside_risk_pct, 0)) + "% (" + str.tostring(math.round(remaining_downside)) + "p to exhaustion)\n\nCOLOR GUIDE:\nGreen >50%: Fresh, excellent RRR\nYellow 20-50%: Moderate RRR\nOrange 10-20%: Caution, limited room\nRed <10%: Exhausted, poor RRR"
+    
+    table.cell(micro_table, 0, 8, "DAILY RANGE", text_color=color.white, bgcolor=color.new(color.gray, 50), text_size=text_size_cells, tooltip=range_tooltip)
+    table.cell(micro_table, 1, 8, range_status_text, text_color=color.white, bgcolor=range_status_color, text_size=text_size_cells)
+else if barstate.islast and not show_daily_exhaustion
+    // 8-row table when daily exhaustion disabled
+    var table micro_table_small = table.new(table_pos, 2, 8, border_width=2, force_overlay=true)
+    
+    // ROW 0: MACRO ALIGNMENT
+    macro_align_color = macro_trend_input == "BULL" ? color.new(color.green, 30) : macro_trend_input == "BEAR" ? color.new(color.red, 30) : macro_trend_input == "NEUTRAL" ? color.new(color.gray, 30) : color.new(color.blue, 30)
+    
+    var string macro_display_text2 = ""
+    
+    if macro_mode == "Auto from 1H"
+        macro_display_text2 := macro_trend_input + " (Auto 1H)\nFilter: " + (macro_trend_input == "BULL" ? "LONGS ONLY" : "SHORTS ONLY")
+    else
+        macro_filter_text2 = macro_trend_input == "BULL" ? "LONGS ONLY" : macro_trend_input == "BEAR" ? "SHORTS ONLY" : macro_trend_input == "NEUTRAL" ? "NO TRADES" : "SHOW ALL"
+        macro_display_text2 := macro_trend_input + "\nFilter: " + macro_filter_text2
+    
+    macro_tooltip2 = macro_mode == "Auto from 1H" ? "Automatic detection from 1H Macro_EP\n1H Close: " + str.tostring(h1_close, "#.#####") + "\n1H EMA 200: " + str.tostring(h1_ema200, "#.#####") + "\nLogic: close > ema200 = BULL" : "Manual override mode\nSet in indicator settings"
+    
+    table.cell(micro_table_small, 0, 0, "MACRO ALIGN", text_color=color.white, bgcolor=color.new(color.gray, 20), text_size=text_size_header)
+    table.cell(micro_table_small, 1, 0, macro_display_text2, text_color=color.white, bgcolor=macro_align_color, text_size=text_size_header, tooltip=macro_tooltip2)
+    
+    // ROW 1: 1H RISK RATING - NEW IN v2.1
+    if enable_1h_risk_display and has_1h_buffer_data
+        risk_display_text = h1_risk_emoji + " " + h1_risk_rating
+        risk_tooltip = "Risk rating from 1H buffer system\nReplicates Macro_Patterns v1.2 calculation\n\n🟢 STRONG: >5 ATR/bars buffer\n🟡 MODERATE: 3-5 ATR/bars buffer\n🟠 WEAK: 2-3 ATR/bars buffer\n🔴 FRAGILE: <2 ATR/bars buffer\n\nCalculated from:\n- Distance to Macro Trend (200 EMA)\n- Distance to Zone Exit (100 EMA)\n- ADX threshold (40) bars remaining\n\nRating uses WORSE of distance/time (conservative)"
+        table.cell(micro_table_small, 0, 1, "1H Risk", text_color=color.white, bgcolor=color.new(color.gray, 50), text_size=text_size_cells, tooltip=risk_tooltip)
+        table.cell(micro_table_small, 1, 1, risk_display_text, text_color=color.white, bgcolor=h1_risk_color, text_size=text_size_cells)
+    else
+        table.cell(micro_table_small, 0, 1, "1H Risk", text_color=color.white, bgcolor=color.new(color.gray, 50), text_size=text_size_cells)
+        table.cell(micro_table_small, 1, 1, "---", text_color=color.white, bgcolor=color.new(color.gray, 80), text_size=text_size_cells)
+    
+    // ROW 2: 1H CRITICAL LEVEL - NEW IN v2.1
+    if enable_1h_critical_level and has_1h_buffer_data
+        critical_display_text = "❌ " + str.tostring(h1_critical_level, "#.#####") + "\n(" + h1_break_source + ")"
+        critical_tooltip = "Pattern invalidation level (weakest buffer)\n\nShows price of closest failure point from:\n- Macro Trend: 200 EMA break\n- Zone Exit: 100 EMA break (leaving zone)\n- 100 EMA: Violation during pullback\n\nUse for:\n- Stop loss placement (place below/above with buffer)\n- KO certificate leverage selection (calculate distance)\n- Real-time risk monitoring during trade"
+        table.cell(micro_table_small, 0, 2, "1H Critical", text_color=color.white, bgcolor=color.new(color.gray, 50), text_size=text_size_cells, tooltip=critical_tooltip)
+        table.cell(micro_table_small, 1, 2, critical_display_text, text_color=color.white, bgcolor=color.new(color.red, 80), text_size=text_size_cells)
+    else
+        table.cell(micro_table_small, 0, 2, "1H Critical", text_color=color.white, bgcolor=color.new(color.gray, 50), text_size=text_size_cells)
+        table.cell(micro_table_small, 1, 2, "---", text_color=color.white, bgcolor=color.new(color.gray, 80), text_size=text_size_cells)
+    
+    // ROW 3: MICRO RSI
+    rsi_zone_text = rsi_raw > rsi_overbought ? "OVERBOUGHT" : rsi_raw < rsi_oversold ? "OVERSOLD" : "NEUTRAL"
+    rsi_zone_color = rsi_raw > rsi_overbought ? color.new(color.red, 30) : rsi_raw < rsi_oversold ? color.new(color.green, 30) : color.new(color.gray, 70)
+    
+    rsi_display_text2 = str.tostring(math.round(rsi_smoothed, 1)) + "\n" + rsi_zone_text
+    
+    table.cell(micro_table_small, 0, 3, "MICRO RSI", text_color=color.white, bgcolor=color.new(color.gray, 50), text_size=text_size_cells)
+    table.cell(micro_table_small, 1, 3, rsi_display_text2, text_color=color.white, bgcolor=rsi_zone_color, text_size=text_size_cells)
+    
+    // ROW 4: RSI DIVERGENCE
+    var string div_text2 = "NONE"
+    var color div_color2 = color.gray
+    
+    if bullish_divergence
+        div_text2 := "BULLISH DIV"
+        div_color2 := color.new(color.green, 40)
+    else if bearish_divergence
+        div_text2 := "BEARISH DIV"
+        div_color2 := color.new(color.red, 40)
+    else if hidden_bull_div
+        div_text2 := "HIDDEN BULL"
+        div_color2 := color.new(color.green, 60)
+    else if hidden_bear_div
+        div_text2 := "HIDDEN BEAR"
+        div_color2 := color.new(color.red, 60)
+    else
+        div_text2 := "NONE"
+        div_color2 := color.new(color.gray, 70)
+    
+    table.cell(micro_table_small, 0, 4, "RSI DIVERGENCE", text_color=color.white, bgcolor=color.new(color.gray, 50), text_size=text_size_cells)
+    table.cell(micro_table_small, 1, 4, div_text2, text_color=color.white, bgcolor=div_color2, text_size=text_size_cells)
+    
+    // ROW 5: ENTRY SIGNAL WITH TRIGGER TYPE
+    signal_display2 = current_signal + "\n" + trigger_type
+    
+    table.cell(micro_table_small, 0, 5, "ENTRY SIGNAL", text_color=color.white, bgcolor=color.new(color.gray, 50), text_size=text_size_cells)
+    table.cell(micro_table_small, 1, 5, signal_display2, text_color=color.white, bgcolor=signal_color, text_size=text_size_cells)
+    
+    // ROW 6: KELTNER POSITION
+    keltner_zone_text = keltner_position >= keltner_upper_threshold ? "UPPER ZONE" : keltner_position <= keltner_lower_threshold ? "LOWER ZONE" : "MIDDLE ZONE"
+    keltner_zone_color = keltner_position >= keltner_upper_threshold ? color.new(color.red, 30) : keltner_position <= keltner_lower_threshold ? color.new(color.green, 30) : color.new(color.gray, 70)
+    
+    keltner_display_text2 = str.tostring(math.round(keltner_position, 0)) + "%\n" + keltner_zone_text
+    
+    table.cell(micro_table_small, 0, 6, "KELTNER POS", text_color=color.white, bgcolor=color.new(color.gray, 50), text_size=text_size_cells)
+    table.cell(micro_table_small, 1, 6, keltner_display_text2, text_color=color.white, bgcolor=keltner_zone_color, text_size=text_size_cells)
+    
+    // ROW 7: TRADING HOURS
+    var string hours_text2 = ""
+    var color hours_color2 = color.gray
+    
+    if not enable_time_filter
+        hours_text2 := "DISABLED"
+        hours_color2 := color.new(color.gray, 70)
+    else if inside_trading_hours and not close_to_end
+        hours_text2 := "ACTIVE\nTrading"
+        hours_color2 := color.new(color.green, 30)
+    else if close_to_end
+        hours_text2 := "ACTIVE\n30min warning"
+        hours_color2 := color.new(color.orange, 50)
+    else
+        hours_text2 := "CLOSED\nOutside hours"
+        hours_color2 := color.new(color.red, 30)
+    
+    table.cell(micro_table_small, 0, 7, "TRADING HOURS", text_color=color.white, bgcolor=color.new(color.gray, 50), text_size=text_size_cells)
+    table.cell(micro_table_small, 1, 7, hours_text2, text_color=color.white, bgcolor=hours_color2, text_size=text_size_cells)

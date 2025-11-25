@@ -1,0 +1,372 @@
+//@version=6
+// Basic Pattern Scanner v1.3
+// Purpose: Scan all 17 instruments in optimized layout with ACTIVE transition alerts
+// Updated: 2025-11-24
+// Changes: Added alert conditions for instruments transitioning to ACTIVE on confirmed 1H close
+// Layout: FOREX (5+5) top, COMMODITIES (3) + INDICES (4) bottom
+
+indicator("Basic Pattern Scanner", shorttitle="Scanner", overlay=false)
+
+// ============================================================================
+// INPUT PARAMETERS
+// ============================================================================
+
+// Display Settings
+string tablePosition = input.string("top_left", "Table Position", options=["top_left", "top_center", "top_right", "middle_left", "middle_center", "middle_right", "bottom_left", "bottom_center", "bottom_right"], group="Display")
+string tableSize = input.string("small", "Table Size", options=["auto", "tiny", "small", "normal", "large"], group="Display")
+
+// FOREX-USD (5 pairs)
+string forexUSD1 = input.symbol("FX:USDJPY", "USD/JPY", group="💱 FOREX-USD")
+string forexUSD2 = input.symbol("FX:GBPUSD", "GBP/USD", group="💱 FOREX-USD")
+string forexUSD3 = input.symbol("FX:USDCAD", "USD/CAD", group="💱 FOREX-USD")
+string forexUSD4 = input.symbol("FX:USDCHF", "USD/CHF", group="💱 FOREX-USD")
+string forexUSD5 = input.symbol("FX:AUDUSD", "AUD/USD", group="💱 FOREX-USD")
+
+// FOREX-EUR (5 pairs)
+string forexEUR1 = input.symbol("FX:EURUSD", "EUR/USD", group="💱 FOREX-EUR")
+string forexEUR2 = input.symbol("FX:EURJPY", "EUR/JPY", group="💱 FOREX-EUR")
+string forexEUR3 = input.symbol("FX:EURCHF", "EUR/CHF", group="💱 FOREX-EUR")
+string forexEUR4 = input.symbol("FX:EURGBP", "EUR/GBP", group="💱 FOREX-EUR")
+string forexEUR5 = input.symbol("FX:EURCAD", "EUR/CAD", group="💱 FOREX-EUR")
+
+// COMMODITIES (3)
+string commodity1 = input.symbol("FX:XAUUSD", "Gold", group="🥇 COMMODITIES")
+string commodity2 = input.symbol("FX:XAGUSD", "Silver", group="🥇 COMMODITIES")
+string commodity3 = input.symbol("CAPITALCOM:COPPER", "Copper", group="🥇 COMMODITIES")
+
+// INDICES (4)
+string index1 = input.symbol("BLUEBERRY:SP500", "S&P 500", group="📈 INDICES")
+string index2 = input.symbol("IG:NASDAQ", "Nasdaq", group="📈 INDICES")
+string index3 = input.symbol("GOMARKETS:DAX40", "DAX", group="📈 INDICES")
+string index4 = input.symbol("FX:US30", "Dow Jones", group="📈 INDICES")
+
+// ============================================================================
+// HELPER FUNCTIONS
+// ============================================================================
+
+getShortName(string fullSymbol) =>
+    string result = fullSymbol
+    if str.contains(fullSymbol, ":")
+        parts = str.split(fullSymbol, ":")
+        result := array.get(parts, 1)
+    result
+
+getTablePosition(string pos) =>
+    string result = pos
+    result == "top_left" ? position.top_left : result == "top_center" ? position.top_center : result == "top_right" ? position.top_right : result == "middle_left" ? position.middle_left : result == "middle_center" ? position.middle_center : result == "middle_right" ? position.middle_right : result == "bottom_left" ? position.bottom_left : result == "bottom_center" ? position.bottom_center : position.bottom_right
+
+// ============================================================================
+// PATTERN DETECTION FUNCTION
+// ============================================================================
+
+calcBasicPattern() =>
+    float ema50 = ta.ema(close, 50)
+    float ema100 = ta.ema(close, 100)
+    float ema200 = ta.ema(close, 200)
+    float atr = ta.atr(14)
+    
+    string trend = close > ema200 ? "BULL" : "BEAR"
+    
+    float zoneTop = math.max(ema50, ema100)
+    float zoneBottom = math.min(ema50, ema100)
+    bool inZone = close >= zoneBottom and close <= zoneTop
+    
+    float distToZone = 0.0
+    if inZone
+        distToZone := 0.0
+    else if close > zoneTop
+        distToZone := (close - zoneTop) / atr
+    else
+        distToZone := (zoneBottom - close) / atr
+    
+    string status = "UNDEFINED"
+    if inZone
+        status := "ACTIVE"
+    else if distToZone <= 1.0
+        status := "FORMING"
+    else
+        status := "DISTANT"
+    
+    string pattern = "---"
+    if inZone
+        if trend == "BULL"
+            pattern := "EPL"
+        else
+            pattern := "EPS"
+    
+    string temperature = status == "ACTIVE" ? "🔥 HOT" : status == "FORMING" ? "⚡ WARM" : "❄️ COLD"
+    
+    [trend, status, pattern, distToZone, temperature]
+
+// ============================================================================
+// FETCH DATA FOR ALL INSTRUMENTS
+// ============================================================================
+
+[trend_usd1, status_usd1, pattern_usd1, dist_usd1, temp_usd1] = request.security(forexUSD1, "60", calcBasicPattern())
+[trend_usd2, status_usd2, pattern_usd2, dist_usd2, temp_usd2] = request.security(forexUSD2, "60", calcBasicPattern())
+[trend_usd3, status_usd3, pattern_usd3, dist_usd3, temp_usd3] = request.security(forexUSD3, "60", calcBasicPattern())
+[trend_usd4, status_usd4, pattern_usd4, dist_usd4, temp_usd4] = request.security(forexUSD4, "60", calcBasicPattern())
+[trend_usd5, status_usd5, pattern_usd5, dist_usd5, temp_usd5] = request.security(forexUSD5, "60", calcBasicPattern())
+
+[trend_eur1, status_eur1, pattern_eur1, dist_eur1, temp_eur1] = request.security(forexEUR1, "60", calcBasicPattern())
+[trend_eur2, status_eur2, pattern_eur2, dist_eur2, temp_eur2] = request.security(forexEUR2, "60", calcBasicPattern())
+[trend_eur3, status_eur3, pattern_eur3, dist_eur3, temp_eur3] = request.security(forexEUR3, "60", calcBasicPattern())
+[trend_eur4, status_eur4, pattern_eur4, dist_eur4, temp_eur4] = request.security(forexEUR4, "60", calcBasicPattern())
+[trend_eur5, status_eur5, pattern_eur5, dist_eur5, temp_eur5] = request.security(forexEUR5, "60", calcBasicPattern())
+
+[trend_com1, status_com1, pattern_com1, dist_com1, temp_com1] = request.security(commodity1, "60", calcBasicPattern())
+[trend_com2, status_com2, pattern_com2, dist_com2, temp_com2] = request.security(commodity2, "60", calcBasicPattern())
+[trend_com3, status_com3, pattern_com3, dist_com3, temp_com3] = request.security(commodity3, "60", calcBasicPattern())
+
+[trend_idx1, status_idx1, pattern_idx1, dist_idx1, temp_idx1] = request.security(index1, "60", calcBasicPattern())
+[trend_idx2, status_idx2, pattern_idx2, dist_idx2, temp_idx2] = request.security(index2, "60", calcBasicPattern())
+[trend_idx3, status_idx3, pattern_idx3, dist_idx3, temp_idx3] = request.security(index3, "60", calcBasicPattern())
+[trend_idx4, status_idx4, pattern_idx4, dist_idx4, temp_idx4] = request.security(index4, "60", calcBasicPattern())
+
+// ============================================================================
+// TRANSITION DETECTION (for alerts)
+// Fires when instrument becomes ACTIVE (was not ACTIVE last bar, is ACTIVE now)
+// ============================================================================
+
+// FOREX-USD transitions
+bool justActive_usd1 = (status_usd1 == "ACTIVE") and (status_usd1[1] != "ACTIVE")
+bool justActive_usd2 = (status_usd2 == "ACTIVE") and (status_usd2[1] != "ACTIVE")
+bool justActive_usd3 = (status_usd3 == "ACTIVE") and (status_usd3[1] != "ACTIVE")
+bool justActive_usd4 = (status_usd4 == "ACTIVE") and (status_usd4[1] != "ACTIVE")
+bool justActive_usd5 = (status_usd5 == "ACTIVE") and (status_usd5[1] != "ACTIVE")
+
+// FOREX-EUR transitions
+bool justActive_eur1 = (status_eur1 == "ACTIVE") and (status_eur1[1] != "ACTIVE")
+bool justActive_eur2 = (status_eur2 == "ACTIVE") and (status_eur2[1] != "ACTIVE")
+bool justActive_eur3 = (status_eur3 == "ACTIVE") and (status_eur3[1] != "ACTIVE")
+bool justActive_eur4 = (status_eur4 == "ACTIVE") and (status_eur4[1] != "ACTIVE")
+bool justActive_eur5 = (status_eur5 == "ACTIVE") and (status_eur5[1] != "ACTIVE")
+
+// COMMODITIES transitions
+bool justActive_com1 = (status_com1 == "ACTIVE") and (status_com1[1] != "ACTIVE")
+bool justActive_com2 = (status_com2 == "ACTIVE") and (status_com2[1] != "ACTIVE")
+bool justActive_com3 = (status_com3 == "ACTIVE") and (status_com3[1] != "ACTIVE")
+
+// INDICES transitions
+bool justActive_idx1 = (status_idx1 == "ACTIVE") and (status_idx1[1] != "ACTIVE")
+bool justActive_idx2 = (status_idx2 == "ACTIVE") and (status_idx2[1] != "ACTIVE")
+bool justActive_idx3 = (status_idx3 == "ACTIVE") and (status_idx3[1] != "ACTIVE")
+bool justActive_idx4 = (status_idx4 == "ACTIVE") and (status_idx4[1] != "ACTIVE")
+
+// Aggregated: ANY instrument just became active
+bool anyJustActive = justActive_usd1 or justActive_usd2 or justActive_usd3 or justActive_usd4 or justActive_usd5 or justActive_eur1 or justActive_eur2 or justActive_eur3 or justActive_eur4 or justActive_eur5 or justActive_com1 or justActive_com2 or justActive_com3 or justActive_idx1 or justActive_idx2 or justActive_idx3 or justActive_idx4
+
+// ============================================================================
+// BUILD ALERT MESSAGE
+// Shows which instrument(s) just became ACTIVE with their pattern
+// ============================================================================
+
+var string alertMsg = ""
+if barstate.isconfirmed and anyJustActive
+    alertMsg := "🔴 ACTIVE HOT: "
+    
+    if justActive_usd1
+        alertMsg := alertMsg + getShortName(forexUSD1) + " (" + pattern_usd1 + "), "
+    if justActive_usd2
+        alertMsg := alertMsg + getShortName(forexUSD2) + " (" + pattern_usd2 + "), "
+    if justActive_usd3
+        alertMsg := alertMsg + getShortName(forexUSD3) + " (" + pattern_usd3 + "), "
+    if justActive_usd4
+        alertMsg := alertMsg + getShortName(forexUSD4) + " (" + pattern_usd4 + "), "
+    if justActive_usd5
+        alertMsg := alertMsg + getShortName(forexUSD5) + " (" + pattern_usd5 + "), "
+    
+    if justActive_eur1
+        alertMsg := alertMsg + getShortName(forexEUR1) + " (" + pattern_eur1 + "), "
+    if justActive_eur2
+        alertMsg := alertMsg + getShortName(forexEUR2) + " (" + pattern_eur2 + "), "
+    if justActive_eur3
+        alertMsg := alertMsg + getShortName(forexEUR3) + " (" + pattern_eur3 + "), "
+    if justActive_eur4
+        alertMsg := alertMsg + getShortName(forexEUR4) + " (" + pattern_eur4 + "), "
+    if justActive_eur5
+        alertMsg := alertMsg + getShortName(forexEUR5) + " (" + pattern_eur5 + "), "
+    
+    if justActive_com1
+        alertMsg := alertMsg + getShortName(commodity1) + " (" + pattern_com1 + "), "
+    if justActive_com2
+        alertMsg := alertMsg + getShortName(commodity2) + " (" + pattern_com2 + "), "
+    if justActive_com3
+        alertMsg := alertMsg + getShortName(commodity3) + " (" + pattern_com3 + "), "
+    
+    if justActive_idx1
+        alertMsg := alertMsg + getShortName(index1) + " (" + pattern_idx1 + "), "
+    if justActive_idx2
+        alertMsg := alertMsg + getShortName(index2) + " (" + pattern_idx2 + "), "
+    if justActive_idx3
+        alertMsg := alertMsg + getShortName(index3) + " (" + pattern_idx3 + "), "
+    if justActive_idx4
+        alertMsg := alertMsg + getShortName(index4) + " (" + pattern_idx4 + "), "
+
+// ============================================================================
+// ALERT CONDITIONS
+// ============================================================================
+
+// Main alert: Any instrument transitions to ACTIVE on confirmed bar close
+alertcondition(anyJustActive and barstate.isconfirmed, title="Scanner: ACTIVE HOT", message="🔴 ACTIVE HOT: Check scanner for instruments now in zone")
+
+// Individual alerts (optional - user can enable specific ones)
+alertcondition(justActive_usd1 and barstate.isconfirmed, title="USDJPY ACTIVE", message="USDJPY now ACTIVE HOT")
+alertcondition(justActive_usd2 and barstate.isconfirmed, title="GBPUSD ACTIVE", message="GBPUSD now ACTIVE HOT")
+alertcondition(justActive_usd3 and barstate.isconfirmed, title="USDCAD ACTIVE", message="USDCAD now ACTIVE HOT")
+alertcondition(justActive_usd4 and barstate.isconfirmed, title="USDCHF ACTIVE", message="USDCHF now ACTIVE HOT")
+alertcondition(justActive_usd5 and barstate.isconfirmed, title="AUDUSD ACTIVE", message="AUDUSD now ACTIVE HOT")
+
+alertcondition(justActive_eur1 and barstate.isconfirmed, title="EURUSD ACTIVE", message="EURUSD now ACTIVE HOT")
+alertcondition(justActive_eur2 and barstate.isconfirmed, title="EURJPY ACTIVE", message="EURJPY now ACTIVE HOT")
+alertcondition(justActive_eur3 and barstate.isconfirmed, title="EURCHF ACTIVE", message="EURCHF now ACTIVE HOT")
+alertcondition(justActive_eur4 and barstate.isconfirmed, title="EURGBP ACTIVE", message="EURGBP now ACTIVE HOT")
+alertcondition(justActive_eur5 and barstate.isconfirmed, title="EURCAD ACTIVE", message="EURCAD now ACTIVE HOT")
+
+alertcondition(justActive_com1 and barstate.isconfirmed, title="XAUUSD ACTIVE", message="XAUUSD (Gold) now ACTIVE HOT")
+alertcondition(justActive_com2 and barstate.isconfirmed, title="XAGUSD ACTIVE", message="XAGUSD (Silver) now ACTIVE HOT")
+alertcondition(justActive_com3 and barstate.isconfirmed, title="COPPER ACTIVE", message="COPPER now ACTIVE HOT")
+
+alertcondition(justActive_idx1 and barstate.isconfirmed, title="SP500 ACTIVE", message="SP500 now ACTIVE HOT")
+alertcondition(justActive_idx2 and barstate.isconfirmed, title="NASDAQ ACTIVE", message="NASDAQ now ACTIVE HOT")
+alertcondition(justActive_idx3 and barstate.isconfirmed, title="DAX40 ACTIVE", message="DAX40 now ACTIVE HOT")
+alertcondition(justActive_idx4 and barstate.isconfirmed, title="US30 ACTIVE", message="US30 now ACTIVE HOT")
+
+// ============================================================================
+// RENDER ROW FUNCTION
+// ============================================================================
+
+renderRow(table tbl, simple string txtSize, int row, int colOffset, string symbol, string status, string pattern, float distance, string temperature) =>
+    // Column 0: Instrument
+    table.cell(tbl, 0 + colOffset, row, getShortName(symbol), text_color=color.new(#E0E0E0, 0), bgcolor=color.new(#2A2A2A, 0), text_size=txtSize)
+    
+    // Column 1: Status
+    color statusBg = status == "ACTIVE" ? color.new(#00C853, 0) : status == "FORMING" ? color.new(#FFA000, 0) : color.new(#616161, 0)
+    table.cell(tbl, 1 + colOffset, row, status, text_color=color.white, bgcolor=statusBg, text_size=txtSize)
+    
+    // Column 2: SEPARATOR (mini)
+    table.cell(tbl, 2 + colOffset, row, "", bgcolor=color.new(#424242, 60), text_size=txtSize)
+    
+    // Column 3: Pattern
+    color patternBg = pattern == "EPL" ? color.new(#00C853, 70) : pattern == "EPS" ? color.new(#D32F2F, 70) : color.new(#424242, 0)
+    table.cell(tbl, 3 + colOffset, row, pattern, text_color=color.white, bgcolor=patternBg, text_size=txtSize)
+    
+    // Column 4: Distance
+    string distDisplay = str.tostring(distance, "#.#") + " ATR"
+    table.cell(tbl, 4 + colOffset, row, distDisplay, text_color=color.new(#B0B0B0, 0), bgcolor=color.new(#2A2A2A, 0), text_size=txtSize)
+    
+    // Column 5: Temperature
+    color tempColor = str.contains(temperature, "HOT") ? color.new(#D32F2F, 0) : str.contains(temperature, "WARM") ? color.new(#FF6F00, 0) : color.new(#42A5F5, 0)
+    table.cell(tbl, 5 + colOffset, row, temperature, text_color=tempColor, bgcolor=color.new(#2A2A2A, 0), text_size=txtSize)
+
+// ============================================================================
+// TABLE RENDERING
+// 13 columns: 6 (left) + 1 (SEPARATOR) + 6 (right)
+// ============================================================================
+
+var table scannerTable = table.new(getTablePosition(tablePosition), 13, 13, border_width=1, border_color=color.new(#3A3A3A, 0))
+
+if barstate.islast
+    txtSize = tableSize == "auto" ? size.auto : tableSize == "tiny" ? size.tiny : tableSize == "small" ? size.small : tableSize == "normal" ? size.normal : size.large
+    
+    // ========== ROW 0: MAIN HEADER ==========
+    table.cell(scannerTable, 0, 0, "🔍 BASIC PATTERN SCANNER - 17 INSTRUMENTS", text_color=color.white, bgcolor=color.new(#1565C0, 0), text_size=txtSize)
+    table.merge_cells(scannerTable, 0, 0, 12, 0)
+    
+    // ========== ROW 1: COLUMN HEADERS ==========
+    color headerBg = color.new(#2C2C2C, 0)
+    
+    // LEFT SIDE (cols 0-5)
+    table.cell(scannerTable, 0, 1, "Instrument", text_color=color.new(#E0E0E0, 0), bgcolor=headerBg, text_size=txtSize)
+    table.cell(scannerTable, 1, 1, "Status", text_color=color.new(#E0E0E0, 0), bgcolor=headerBg, text_size=txtSize)
+    table.cell(scannerTable, 2, 1, "", bgcolor=color.new(#424242, 30), text_size=txtSize)
+    table.cell(scannerTable, 3, 1, "Pattern", text_color=color.new(#E0E0E0, 0), bgcolor=headerBg, text_size=txtSize)
+    table.cell(scannerTable, 4, 1, "Distance", text_color=color.new(#E0E0E0, 0), bgcolor=headerBg, text_size=txtSize)
+    table.cell(scannerTable, 5, 1, "Signal", text_color=color.new(#E0E0E0, 0), bgcolor=headerBg, text_size=txtSize)
+    
+    // MIDDLE SEPARATOR (col 6) - NICE COLOR
+    table.cell(scannerTable, 6, 1, "│", text_color=color.new(#FFD700, 50), bgcolor=color.new(#1E88E5, 60), text_size=size.large)
+    
+    // RIGHT SIDE (cols 7-12)
+    table.cell(scannerTable, 7, 1, "Instrument", text_color=color.new(#E0E0E0, 0), bgcolor=headerBg, text_size=txtSize)
+    table.cell(scannerTable, 8, 1, "Status", text_color=color.new(#E0E0E0, 0), bgcolor=headerBg, text_size=txtSize)
+    table.cell(scannerTable, 9, 1, "", bgcolor=color.new(#424242, 30), text_size=txtSize)
+    table.cell(scannerTable, 10, 1, "Pattern", text_color=color.new(#E0E0E0, 0), bgcolor=headerBg, text_size=txtSize)
+    table.cell(scannerTable, 11, 1, "Distance", text_color=color.new(#E0E0E0, 0), bgcolor=headerBg, text_size=txtSize)
+    table.cell(scannerTable, 12, 1, "Signal", text_color=color.new(#E0E0E0, 0), bgcolor=headerBg, text_size=txtSize)
+    
+    // ========== ROW 2: SECTION HEADERS (FOREX) ==========
+    // LEFT: FOREX-USD
+    table.cell(scannerTable, 0, 2, "💱 FOREX-USD (5)", text_color=color.new(#64B5F6, 0), bgcolor=color.new(#1A1A2A, 0), text_size=txtSize)
+    table.merge_cells(scannerTable, 0, 2, 5, 2)
+    
+    // SEPARATOR
+    table.cell(scannerTable, 6, 2, "│", text_color=color.new(#FFD700, 50), bgcolor=color.new(#1E88E5, 60), text_size=size.large)
+    
+    // RIGHT: FOREX-EUR
+    table.cell(scannerTable, 7, 2, "💱 FOREX-EUR (5)", text_color=color.new(#64B5F6, 0), bgcolor=color.new(#1A1A2A, 0), text_size=txtSize)
+    table.merge_cells(scannerTable, 7, 2, 12, 2)
+    
+    // ========== ROWS 3-7: FOREX PAIRS (5 USD + 5 EUR) ==========
+    for i = 0 to 4
+        // LEFT: USD pairs
+        if i == 0
+            renderRow(scannerTable, txtSize, 3 + i, 0, forexUSD1, status_usd1, pattern_usd1, dist_usd1, temp_usd1)
+        else if i == 1
+            renderRow(scannerTable, txtSize, 3 + i, 0, forexUSD2, status_usd2, pattern_usd2, dist_usd2, temp_usd2)
+        else if i == 2
+            renderRow(scannerTable, txtSize, 3 + i, 0, forexUSD3, status_usd3, pattern_usd3, dist_usd3, temp_usd3)
+        else if i == 3
+            renderRow(scannerTable, txtSize, 3 + i, 0, forexUSD4, status_usd4, pattern_usd4, dist_usd4, temp_usd4)
+        else if i == 4
+            renderRow(scannerTable, txtSize, 3 + i, 0, forexUSD5, status_usd5, pattern_usd5, dist_usd5, temp_usd5)
+        
+        // SEPARATOR
+        table.cell(scannerTable, 6, 3 + i, "│", text_color=color.new(#FFD700, 50), bgcolor=color.new(#1E88E5, 60), text_size=size.large)
+        
+        // RIGHT: EUR pairs
+        if i == 0
+            renderRow(scannerTable, txtSize, 3 + i, 7, forexEUR1, status_eur1, pattern_eur1, dist_eur1, temp_eur1)
+        else if i == 1
+            renderRow(scannerTable, txtSize, 3 + i, 7, forexEUR2, status_eur2, pattern_eur2, dist_eur2, temp_eur2)
+        else if i == 2
+            renderRow(scannerTable, txtSize, 3 + i, 7, forexEUR3, status_eur3, pattern_eur3, dist_eur3, temp_eur3)
+        else if i == 3
+            renderRow(scannerTable, txtSize, 3 + i, 7, forexEUR4, status_eur4, pattern_eur4, dist_eur4, temp_eur4)
+        else if i == 4
+            renderRow(scannerTable, txtSize, 3 + i, 7, forexEUR5, status_eur5, pattern_eur5, dist_eur5, temp_eur5)
+    
+    // ========== ROW 8: SECTION HEADERS (COMMODITIES + INDICES) ==========
+    // LEFT: COMMODITIES
+    table.cell(scannerTable, 0, 8, "🥇 COMMODITIES (3)", text_color=color.new(#FFD54F, 0), bgcolor=color.new(#1A1A2A, 0), text_size=txtSize)
+    table.merge_cells(scannerTable, 0, 8, 5, 8)
+    
+    // SEPARATOR
+    table.cell(scannerTable, 6, 8, "│", text_color=color.new(#FFD700, 50), bgcolor=color.new(#1E88E5, 60), text_size=size.large)
+    
+    // RIGHT: INDICES
+    table.cell(scannerTable, 7, 8, "📈 INDICES (4)", text_color=color.new(#4DD0E1, 0), bgcolor=color.new(#1A1A2A, 0), text_size=txtSize)
+    table.merge_cells(scannerTable, 7, 8, 12, 8)
+    
+    // ========== ROWS 9-12: COMMODITIES (3) + INDICES (4) ==========
+    // Row 9
+    renderRow(scannerTable, txtSize, 9, 0, commodity1, status_com1, pattern_com1, dist_com1, temp_com1)  // Gold
+    table.cell(scannerTable, 6, 9, "│", text_color=color.new(#FFD700, 50), bgcolor=color.new(#1E88E5, 60), text_size=size.large)
+    renderRow(scannerTable, txtSize, 9, 7, index1, status_idx1, pattern_idx1, dist_idx1, temp_idx1)  // S&P 500
+    
+    // Row 10
+    renderRow(scannerTable, txtSize, 10, 0, commodity2, status_com2, pattern_com2, dist_com2, temp_com2)  // Silver
+    table.cell(scannerTable, 6, 10, "│", text_color=color.new(#FFD700, 50), bgcolor=color.new(#1E88E5, 60), text_size=size.large)
+    renderRow(scannerTable, txtSize, 10, 7, index2, status_idx2, pattern_idx2, dist_idx2, temp_idx2)  // Nasdaq
+    
+    // Row 11
+    renderRow(scannerTable, txtSize, 11, 0, commodity3, status_com3, pattern_com3, dist_com3, temp_com3)  // Copper
+    table.cell(scannerTable, 6, 11, "│", text_color=color.new(#FFD700, 50), bgcolor=color.new(#1E88E5, 60), text_size=size.large)
+    renderRow(scannerTable, txtSize, 11, 7, index3, status_idx3, pattern_idx3, dist_idx3, temp_idx3)  // DAX
+    
+    // Row 12
+    // Left side empty (only 3 commodities)
+    for col = 0 to 5
+        table.cell(scannerTable, col, 12, "", bgcolor=color.new(#2A2A2A, 0), text_size=txtSize)
+    table.cell(scannerTable, 6, 12, "│", text_color=color.new(#FFD700, 50), bgcolor=color.new(#1E88E5, 60), text_size=size.large)
+    renderRow(scannerTable, txtSize, 12, 7, index4, status_idx4, pattern_idx4, dist_idx4, temp_idx4)  // Dow Jones

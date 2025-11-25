@@ -1,0 +1,617 @@
+// This Pine Script™ code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © Trading System 5.0
+
+//@version=6
+indicator("Micro CBR v1.2", shorttitle="Micro CBR v1.2", overlay=true, max_labels_count=500)
+
+// ============================================================================
+// MICRO CBR v1.2 - CBRL/CBRS ENTRY EXECUTION (5M TIMEFRAME)
+// ============================================================================
+// Purpose: Tactical entry signal generation for Consolidation Breakout Retest patterns
+// Patterns: CBRL (Consolidation Breakout Retest Long), CBRS (Consolidation Breakout Retest Short)
+// Timeframe: 5M (entry execution)
+// Requires: Macro_Patterns v1.2 on 1H chart for pattern identification
+//
+// NEW IN v1.2: Enhanced Trigger C Implementation
+//   - Refined compression detection (3-5 bar tracking)
+//   - 2-bar momentum window after compression
+//   - Distance (>0.5 ATR) + Clearance (>0.2 ATR) validation
+//   - Visual compression zone highlighting
+//   - REMOVED: Trigger B (Double Test) per Entry_Trigger_Alert_Specifications_v1.0
+//
+// v1.1: 1H Buffer Integration
+//   - Fetches buffer data from 1H Macro_Patterns v1.2
+//   - Displays risk rating (STRONG/MODERATE/WEAK/FRAGILE) during RETEST phase
+//   - Shows critical invalidation level for stop loss reference
+//
+// Pattern Library: v2.0
+// Trading System: 5.0
+// Created: November 21, 2025
+// Updated: November 25, 2025 (v1.2 - Trigger C Enhancement)
+// ============================================================================
+
+// ============================================================================
+// SECTION 1: INPUTS & SETTINGS
+// ============================================================================
+
+// --- 1H Buffer Integration Settings ---
+bufferHeader = input.bool(true, "=== 1H BUFFER INTEGRATION (v1.1) ===", group="Buffer Integration", inline="header0")
+enable_1h_risk_display = input.bool(true, "Show 1H Pattern Risk", group="Buffer Integration", tooltip="Display risk rating from 1H buffer system\nReplicates Macro_Patterns v1.2 RETEST phase logic\nHelps time entry urgency during retest window")
+enable_1h_critical_level = input.bool(true, "Show 1H Critical Level", group="Buffer Integration", tooltip="Display pattern invalidation level (retest failure price)\nCalculated from: Breakout level ± tolerance\nUse for stop loss placement")
+show_critical_line = input.bool(true, "Show Critical Level Line on Chart", group="Buffer Integration", tooltip="Draw horizontal line at critical level for visual reference\nRed line shows exact price where retest fails")
+critical_line_style_input = input.string("dashed", "Critical Line Style", options=["solid", "dashed", "dotted"], group="Buffer Integration")
+
+// --- Display Settings ---
+displayHeader = input.bool(true, "=== DISPLAY SETTINGS ===", group="Display", inline="header1")
+showTriggers = input.bool(true, "Show Entry Triggers", group="Display")
+showLevels = input.bool(true, "Show Breakout Level", group="Display")
+showCandles = input.bool(true, "Show Candle Patterns", group="Display")
+showCompression = input.bool(true, "Show Compression Zones", group="Display", tooltip="Highlight bars during compression phase")
+showTable = input.bool(true, "Show Info Table", group="Display")
+tablePosition = input.string("top_right", "Table Position", options=["top_left", "top_center", "top_right", "middle_left", "middle_center", "middle_right", "bottom_left", "bottom_center", "bottom_right"], group="Display")
+
+// --- Entry Trigger Settings ---
+triggerHeader = input.bool(true, "=== ENTRY TRIGGER SETTINGS ===", group="Triggers", inline="header2")
+enableTriggerA = input.bool(true, "Enable Trigger A (Clean Bounce/Rejection)", group="Triggers")
+enableTriggerC = input.bool(true, "Enable Trigger C (Compression Break)", group="Triggers")
+retestToleranceATR = input.float(0.3, "Retest Tolerance (ATR multiplier)", minval=0.1, maxval=1.0, step=0.1, group="Triggers")
+compressionThreshold = input.float(0.6, "Compression Range Threshold (ATR multiplier)", minval=0.4, maxval=0.8, step=0.1, group="Triggers", tooltip="Bar range must be < this * ATR to count as compression")
+momentumDistance = input.float(0.5, "Momentum Break Distance (ATR multiplier)", minval=0.3, maxval=1.0, step=0.1, group="Triggers", tooltip="Price must move > this * ATR from compression extreme")
+momentumClearance = input.float(0.2, "Momentum Clearance (ATR multiplier)", minval=0.1, maxval=0.5, step=0.1, group="Triggers", tooltip="Close must clear compression by > this * ATR")
+
+// --- Candle Pattern Settings ---
+candleHeader = input.bool(true, "=== CANDLE PATTERN SETTINGS ===", group="Candles", inline="header3")
+wickRatioMin = input.float(2.0, "Min Wick/Body Ratio", minval=1.5, maxval=4.0, step=0.5, group="Candles")
+bodyPercent = input.float(0.3, "Max Body % for Pin", minval=0.2, maxval=0.5, step=0.05, group="Candles")
+
+// --- Daily Range Settings ---
+rangeHeader = input.bool(true, "=== DAILY RANGE SETTINGS ===", group="Range", inline="header4")
+enableRangeFilter = input.bool(true, "Enable Daily Range Filter", group="Range")
+maxRangeExhaustion = input.float(80.0, "Max Range Exhaustion %", minval=50, maxval=95, step=5, group="Range")
+
+// --- Session Settings ---
+sessionHeader = input.bool(true, "=== SESSION SETTINGS ===", group="Session", inline="header5")
+enableSessionFilter = input.bool(true, "Enable Session Filter", group="Session")
+londonStart = input.int(7, "London Start (UTC)", minval=0, maxval=23, group="Session")
+londonEnd = input.int(16, "London End (UTC)", minval=0, maxval=23, group="Session")
+usStart = input.int(13, "US Start (UTC)", minval=0, maxval=23, group="Session")
+usEnd = input.int(20, "US End (UTC)", minval=0, maxval=23, group="Session")
+
+// ============================================================================
+// SECTION 2: 1H BUFFER INTEGRATION
+// Replicates Macro_Patterns v1.2 CBRL/CBRS buffer logic
+// Calculates pattern invalidation buffers from 1H data during RETEST phase
+// ============================================================================
+
+// Fetch all necessary 1H data for buffer calculation
+h1_close = request.security(syminfo.tickerid, "60", close, lookahead=barmerge.lookahead_off)
+h1_ema200 = request.security(syminfo.tickerid, "60", ta.ema(close, 200), lookahead=barmerge.lookahead_off)
+h1_atr = request.security(syminfo.tickerid, "60", ta.atr(14), lookahead=barmerge.lookahead_off)
+
+// Fetch 1H ADX for time buffer calculation
+[h1_diplus, h1_diminus, h1_adx] = request.security(syminfo.tickerid, "60", ta.dmi(14, 14), lookahead=barmerge.lookahead_off)
+
+// Calculate ADX velocity metrics on every bar
+float adx_velocity = ta.change(h1_adx, 1)
+float adx_velocity_smooth = ta.sma(adx_velocity, 3)
+
+// ============================================================================
+// SECTION 3: MACRO PATTERN DETECTION (FROM 1H CHART)
+// ============================================================================
+
+// Request 1H data for macro pattern detection
+ema50_1h = request.security(syminfo.tickerid, "60", ta.ema(close, 50), lookahead=barmerge.lookahead_off)
+ema100_1h = request.security(syminfo.tickerid, "60", ta.ema(close, 100), lookahead=barmerge.lookahead_off)
+high_1h = request.security(syminfo.tickerid, "60", high, lookahead=barmerge.lookahead_off)
+low_1h = request.security(syminfo.tickerid, "60", low, lookahead=barmerge.lookahead_off)
+
+// Macro Trend Detection (BULL/BEAR from 200 EMA)
+auto_macro_trend = h1_close > h1_ema200 ? "BULL" : "BEAR"
+macroTrend = auto_macro_trend
+
+// Active pattern based on macro trend
+activePattern = macroTrend == "BULL" ? "CBRL" : macroTrend == "BEAR" ? "CBRS" : "NONE"
+
+// ============================================================================
+// SECTION 4: BREAKOUT LEVEL TRACKING
+// ============================================================================
+
+// Manual input for breakout level (user can adjust based on 1H chart)
+breakoutLevelInput = input.float(0.0, "Manual Breakout Level (0 = auto)", group="Breakout Level", tooltip="Set to 0 to use 50 EMA, or enter specific level from 1H chart")
+
+// Determine breakout level
+breakoutLevel = breakoutLevelInput != 0.0 ? breakoutLevelInput : ema50_1h
+
+// Calculate ATR for distance measurements
+atr_5m = ta.atr(14)
+
+// Calculate distance to breakout level
+distanceToLevel = close - breakoutLevel
+distanceToLevelATR = distanceToLevel / atr_5m
+distancePct = (distanceToLevel / close) * 100
+
+// Check if price is at retest zone (within tolerance)
+atRetestZone = math.abs(distanceToLevelATR) <= retestToleranceATR
+
+// ============================================================================
+// SECTION 5: BUFFER CALCULATION - Replicates Macro_Patterns v1.2
+// Active during RETEST phase for CBRL/CBRS patterns
+// ============================================================================
+
+// Storage variables for buffer display persistence
+var float display_distance_buffer = na
+var float display_time_buffer = na
+var string display_overall_rating = na
+var float display_critical_level = na
+var string display_break_source = na
+
+// Helper function for worse rating comparison
+get_worse_rating(string rating1, string rating2) =>
+    int risk1 = rating1 == "STRONG" ? 1 : rating1 == "MODERATE" ? 2 : rating1 == "WEAK" ? 3 : 4
+    int risk2 = rating2 == "STRONG" ? 1 : rating2 == "MODERATE" ? 2 : rating2 == "WEAK" ? 3 : 4
+    int worse_risk = math.max(risk1, risk2)
+    worse_risk == 4 ? "FRAGILE" : worse_risk == 3 ? "WEAK" : worse_risk == 2 ? "MODERATE" : "STRONG"
+
+// Determine if we're likely in RETEST phase
+bool likely_in_retest = atRetestZone and activePattern != "NONE"
+
+// Calculate buffers when at retest zone
+if enable_1h_risk_display or enable_1h_critical_level
+    if likely_in_retest
+        // === DISTANCE BUFFER CALCULATION ===
+        float buffer_failure = na
+        float buffer_macro = na
+        float distance_buffer = na
+        string break_source = ""
+        float critical_level = na
+        float failure_level = na
+        
+        if activePattern == "CBRL"
+            // CBRL: Bullish breakout retest - measure downside distances
+            failure_level := breakoutLevel - (retestToleranceATR * h1_atr)
+            buffer_failure := (h1_close - failure_level) / h1_atr
+            buffer_macro := (h1_close - h1_ema200) / h1_atr
+            
+            distance_buffer := math.min(buffer_failure, buffer_macro)
+            
+            if distance_buffer == buffer_failure
+                break_source := "Retest Failure"
+                critical_level := failure_level
+            else
+                break_source := "Macro Trend"
+                critical_level := h1_ema200
+        
+        else if activePattern == "CBRS"
+            // CBRS: Bearish breakout retest - measure upside distances
+            failure_level := breakoutLevel + (retestToleranceATR * h1_atr)
+            buffer_failure := (failure_level - h1_close) / h1_atr
+            buffer_macro := (h1_ema200 - h1_close) / h1_atr
+            
+            distance_buffer := math.min(buffer_failure, buffer_macro)
+            
+            if distance_buffer == buffer_failure
+                break_source := "Retest Failure"
+                critical_level := failure_level
+            else
+                break_source := "Macro Trend"
+                critical_level := h1_ema200
+        
+        // === TIME BUFFER CALCULATION ===
+        float buffer_adx = 999.0
+        if adx_velocity_smooth < 0 and h1_adx > 20.0
+            buffer_adx := (h1_adx - 20.0) / math.abs(adx_velocity_smooth)
+        else if h1_adx <= 20.0
+            buffer_adx := 0.0
+        
+        if math.abs(adx_velocity_smooth) < 0.01
+            buffer_adx := 999.0
+        
+        float time_buffer = buffer_adx
+        
+        // === RISK CLASSIFICATION ===
+        string distance_rating = distance_buffer > 5.0 ? "STRONG" : distance_buffer > 3.0 ? "MODERATE" : distance_buffer > 2.0 ? "WEAK" : "FRAGILE"
+        string time_rating = time_buffer > 20.0 ? "STRONG" : time_buffer > 10.0 ? "MODERATE" : time_buffer > 5.0 ? "WEAK" : "FRAGILE"
+        string overall_rating = get_worse_rating(distance_rating, time_rating)
+        
+        // Store for display
+        display_distance_buffer := distance_buffer
+        display_time_buffer := time_buffer
+        display_overall_rating := overall_rating
+        display_critical_level := critical_level
+        display_break_source := break_source
+    
+    else
+        // Clear buffers when not at retest zone
+        display_distance_buffer := na
+        display_time_buffer := na
+        display_overall_rating := na
+        display_critical_level := na
+        display_break_source := na
+
+// Track if we have valid buffer data
+bool has_1h_buffer_data = not na(display_critical_level) and likely_in_retest
+
+// Risk rating color mapping
+color h1_risk_color = display_overall_rating == "STRONG" ? color.new(color.green, 20) : display_overall_rating == "MODERATE" ? color.new(color.yellow, 20) : display_overall_rating == "WEAK" ? color.new(color.orange, 20) : display_overall_rating == "FRAGILE" ? color.new(color.red, 20) : color.new(color.gray, 70)
+
+// Risk rating emoji mapping
+string h1_risk_emoji = display_overall_rating == "STRONG" ? "🟢" : display_overall_rating == "MODERATE" ? "🟡" : display_overall_rating == "WEAK" ? "🟠" : display_overall_rating == "FRAGILE" ? "🔴" : "⚫"
+
+// Critical level line style
+critical_line_style = critical_line_style_input == "solid" ? line.style_solid : critical_line_style_input == "dashed" ? line.style_dashed : line.style_dotted
+
+// ============================================================================
+// SECTION 6: CANDLE PATTERN RECOGNITION (FOR TRIGGER A)
+// ============================================================================
+
+// Basic candle measurements
+candleBody = math.abs(close - open)
+candleRange = high - low
+upperWick = high - math.max(close, open)
+lowerWick = math.min(close, open) - low
+
+// Avoid division by zero
+bodyRatio = candleBody > 0 ? candleRange / candleBody : 0
+wickRatio = candleBody > 0 ? math.max(upperWick, lowerWick) / candleBody : 0
+
+// --- Bullish Candle Patterns (for CBRL) ---
+// Hammer: Small body at top, long lower wick
+isHammer = close > open and lowerWick > (candleBody * wickRatioMin) and upperWick < (candleBody * 0.5) and candleBody < (candleRange * bodyPercent)
+
+// Bullish Engulfing: Green candle completely engulfs previous red candle
+isBullishEngulfing = close > open and close[1] < open[1] and open <= close[1] and close >= open[1]
+
+// Bullish Pin Bar: Long lower wick, small body anywhere
+isBullishPin = lowerWick > (candleBody * wickRatioMin) and lowerWick > upperWick and candleBody < (candleRange * bodyPercent)
+
+// Any bullish rejection pattern
+isBullishRejection = isHammer or isBullishEngulfing or isBullishPin
+
+// --- Bearish Candle Patterns (for CBRS) ---
+// Shooting Star: Small body at bottom, long upper wick
+isShootingStar = close < open and upperWick > (candleBody * wickRatioMin) and lowerWick < (candleBody * 0.5) and candleBody < (candleRange * bodyPercent)
+
+// Bearish Engulfing: Red candle completely engulfs previous green candle
+isBearishEngulfing = close < open and close[1] > open[1] and open >= close[1] and close <= open[1]
+
+// Bearish Pin Bar: Long upper wick, small body anywhere
+isBearishPin = upperWick > (candleBody * wickRatioMin) and upperWick > lowerWick and candleBody < (candleRange * bodyPercent)
+
+// Any bearish rejection pattern
+isBearishRejection = isShootingStar or isBearishEngulfing or isBearishPin
+
+// ============================================================================
+// SECTION 7: ENTRY TRIGGER DETECTION
+// ============================================================================
+
+// --- Supporting Indicators ---
+// RSI for support/resistance confirmation
+rsiLength = 14
+rsi = ta.rsi(close, rsiLength)
+rsiMA = ta.sma(rsi, 3)
+
+// Detect RSI support/resistance at retest
+rsiBullishSupport = rsi > 40  // RSI holding above 40 on retest
+rsiBearishResist = rsi < 60   // RSI failing below 60 on retest
+
+// --- Trigger A: Clean Bounce/Rejection ---
+// Requirements: Price at retest zone + rejection candle + RSI confirmation
+
+triggerA_Bull = false
+triggerA_Bear = false
+
+if enableTriggerA and atRetestZone
+    // CBRL: Bullish bounce from breakout level
+    triggerA_Bull := activePattern == "CBRL" and isBullishRejection and close > breakoutLevel and rsiBullishSupport
+    
+    // CBRS: Bearish rejection at breakout level  
+    triggerA_Bear := activePattern == "CBRS" and isBearishRejection and close < breakoutLevel and rsiBearishResist
+
+triggerA = triggerA_Bull or triggerA_Bear
+
+// --- Trigger C: Compression Break (NEW IMPLEMENTATION v1.2) ---
+// PHASE 1: Compression Detection (3-5 consecutive bars)
+// PHASE 2: Momentum Break within 2 bars
+// Per Entry_Trigger_Alert_Specifications_v1.0
+
+// State tracking variables
+var int compression_bar_count = 0
+var float compression_high = na
+var float compression_low = na
+var int compression_end_bar = na
+var bool compression_active = false
+var int momentum_watch_count = 0
+
+// PHASE 1: Track compression formation
+bool bar_in_compression = atRetestZone and (high - low) < (atr_5m * compressionThreshold)
+
+if bar_in_compression
+    compression_bar_count += 1
+    compression_high := na(compression_high) ? high : math.max(compression_high, high)
+    compression_low := na(compression_low) ? low : math.min(compression_low, low)
+    
+    // Compression valid after 3-5 bars
+    if compression_bar_count >= 3 and compression_bar_count <= 5
+        compression_active := true
+    else if compression_bar_count > 5
+        // Too many bars, reset
+        compression_bar_count := 0
+        compression_high := na
+        compression_low := na
+        compression_end_bar := na
+        compression_active := false
+        momentum_watch_count := 0
+else
+    // Bar broke compression range
+    if compression_active and compression_bar_count >= 3 and compression_bar_count <= 5
+        // Compression phase complete, start momentum watch
+        compression_end_bar := bar_index
+        momentum_watch_count := 0
+        compression_active := false  // Prevent re-triggering
+    else if compression_bar_count > 0 and compression_bar_count < 3
+        // Incomplete compression, reset
+        compression_bar_count := 0
+        compression_high := na
+        compression_low := na
+        compression_end_bar := na
+        compression_active := false
+        momentum_watch_count := 0
+
+// PHASE 2: Monitor momentum break within 2 bars
+bool momentum_break_detected = false
+int bars_since_compression = na(compression_end_bar) ? 0 : bar_index - compression_end_bar
+
+triggerC_Bull = false
+triggerC_Bear = false
+
+if enableTriggerC and not na(compression_end_bar) and bars_since_compression > 0 and bars_since_compression <= 2
+    momentum_watch_count += 1
+    
+    // CBRL: Check upward momentum break
+    if activePattern == "CBRL"
+        float distance_moved = high - compression_high
+        bool distance_ok = distance_moved > (atr_5m * momentumDistance)
+        bool clearance_ok = close > (compression_high + atr_5m * momentumClearance)
+        
+        if distance_ok and clearance_ok
+            triggerC_Bull := true
+            momentum_break_detected := true
+    
+    // CBRS: Check downward momentum break
+    else if activePattern == "CBRS"
+        float distance_moved = compression_low - low
+        bool distance_ok = distance_moved > (atr_5m * momentumDistance)
+        bool clearance_ok = close < (compression_low - atr_5m * momentumClearance)
+        
+        if distance_ok and clearance_ok
+            triggerC_Bear := true
+            momentum_break_detected := true
+    
+    // Reset after 2 bars if no momentum break
+    if bars_since_compression >= 2 and not momentum_break_detected
+        compression_bar_count := 0
+        compression_high := na
+        compression_low := na
+        compression_end_bar := na
+        compression_active := false
+        momentum_watch_count := 0
+
+// Reset if momentum break was detected (pattern complete)
+if momentum_break_detected
+    compression_bar_count := 0
+    compression_high := na
+    compression_low := na
+    compression_end_bar := na
+    compression_active := false
+    momentum_watch_count := 0
+
+triggerC = triggerC_Bull or triggerC_Bear
+
+// --- Combined Entry Signal ---
+entryTrigger = triggerA or triggerC
+entryDirection = triggerA_Bull or triggerC_Bull ? "LONG" : triggerA_Bear or triggerC_Bear ? "SHORT" : "NONE"
+
+// Identify which trigger fired
+activeTrigger = triggerA ? "A" : triggerC ? "C" : ""
+
+// Calculate momentum metrics for display (when Trigger C fires)
+float trigger_c_move_atr = na
+if triggerC
+    if triggerC_Bull
+        trigger_c_move_atr := (high - compression_high) / atr_5m
+    else if triggerC_Bear
+        trigger_c_move_atr := (compression_low - low) / atr_5m
+
+// ============================================================================
+// SECTION 8: DAILY RANGE EXHAUSTION
+// ============================================================================
+
+// Calculate daily range metrics
+dailyHigh = request.security(syminfo.tickerid, "D", high, lookahead=barmerge.lookahead_on)
+dailyLow = request.security(syminfo.tickerid, "D", low, lookahead=barmerge.lookahead_on)
+dailyRange = dailyHigh - dailyLow
+
+// Calculate exhaustion
+rangeUsedUp = close - dailyLow
+rangeUsedDown = dailyHigh - close
+upExhaustion = dailyRange > 0 ? (rangeUsedUp / dailyRange) * 100 : 0
+downExhaustion = dailyRange > 0 ? (rangeUsedDown / dailyRange) * 100 : 0
+
+// Check if range is exhausted
+upRoomAvailable = (100 - upExhaustion) > (100 - maxRangeExhaustion)
+downRoomAvailable = (100 - downExhaustion) > (100 - maxRangeExhaustion)
+
+rangeOK = entryDirection == "LONG" ? upRoomAvailable : entryDirection == "SHORT" ? downRoomAvailable : true
+
+// ============================================================================
+// SECTION 9: SESSION FILTER
+// ============================================================================
+
+// Current hour in UTC
+currentHour = hour(time, "UTC")
+
+// Check if in favorable session
+inLondonSession = currentHour >= londonStart and currentHour < londonEnd
+inUSSession = currentHour >= usStart and currentHour < usEnd
+inFavorableSession = inLondonSession or inUSSession
+
+sessionOK = not enableSessionFilter or inFavorableSession
+
+// ============================================================================
+// SECTION 10: FINAL ENTRY CONFIRMATION
+// ============================================================================
+
+// All conditions must be met
+validEntry = entryTrigger and rangeOK and sessionOK and activePattern != "NONE"
+
+// Entry quality assessment (now only 2 triggers: A and C)
+entryQuality = (atRetestZone ? 1 : 0) + (rangeOK ? 1 : 0) + (sessionOK ? 1 : 0) + ((triggerA or triggerC) ? 1 : 0)
+qualityRating = entryQuality >= 4 ? "PERFECT" : entryQuality == 3 ? "GOOD" : entryQuality == 2 ? "MINIMUM" : "INSUFFICIENT"
+
+// ============================================================================
+// SECTION 11: VISUAL ELEMENTS
+// ============================================================================
+
+// --- Plot Breakout Level ---
+levelColor = activePattern == "CBRL" ? color.new(color.green, 30) : activePattern == "CBRS" ? color.new(color.red, 30) : color.new(color.gray, 50)
+plot(showLevels ? breakoutLevel : na, "Breakout Level", color=levelColor, linewidth=2, style=plot.style_line)
+
+// --- Plot Retest Zone ---
+retestZoneTop = breakoutLevel + (atr_5m * retestToleranceATR)
+retestZoneBot = breakoutLevel - (atr_5m * retestToleranceATR)
+retestZoneFill = plot(showLevels and atRetestZone ? retestZoneTop : na, color=na)
+retestZoneBase = plot(showLevels and atRetestZone ? retestZoneBot : na, color=na)
+fill(retestZoneFill, retestZoneBase, color=color.new(levelColor, 90), title="Retest Zone")
+
+// --- Compression Zone Highlighting (NEW v1.2) ---
+bool in_compression_phase = compression_bar_count >= 3 and compression_bar_count <= 5 and compression_active
+bgcolor(showCompression and in_compression_phase ? color.new(color.blue, 90) : na, title="Compression Phase")
+
+// Draw compression boundaries when active
+var line compression_high_line = na
+var line compression_low_line = na
+
+if showCompression and in_compression_phase
+    line.delete(compression_high_line)
+    line.delete(compression_low_line)
+    compression_high_line := line.new(bar_index - compression_bar_count, compression_high, bar_index, compression_high, color=color.new(color.blue, 40), width=1, style=line.style_dashed)
+    compression_low_line := line.new(bar_index - compression_bar_count, compression_low, bar_index, compression_low, color=color.new(color.blue, 40), width=1, style=line.style_dashed)
+
+// --- 1H Critical Level Line ---
+var line critical_level_line = na
+
+if show_critical_line and enable_1h_critical_level and has_1h_buffer_data
+    line.delete(critical_level_line)
+    critical_level_line := line.new(bar_index - 10, display_critical_level, bar_index + 10, display_critical_level, color=color.new(color.red, 0), width=2, style=critical_line_style)
+
+// --- Entry Trigger Labels ---
+if showTriggers and validEntry
+    labelColor = entryDirection == "LONG" ? color.new(color.green, 0) : color.new(color.red, 0)
+    labelText = "TRIGGER " + activeTrigger + "\n" + entryDirection
+    labelStyle = entryDirection == "LONG" ? label.style_label_up : label.style_label_down
+    labelY = entryDirection == "LONG" ? low : high
+    
+    label.new(bar_index, labelY, labelText, color=labelColor, textcolor=color.white, style=labelStyle, size=size.normal)
+
+// --- Candle Pattern Markers (for Trigger A) ---
+if showCandles and atRetestZone
+    if isBullishRejection and activePattern == "CBRL"
+        label.new(bar_index, low, "🔨", color=color.new(color.green, 70), textcolor=color.green, style=label.style_label_up, size=size.tiny)
+    
+    if isBearishRejection and activePattern == "CBRS"
+        label.new(bar_index, high, "🔨", color=color.new(color.red, 70), textcolor=color.red, style=label.style_label_down, size=size.tiny)
+
+// --- Background coloring for retest zone ---
+bgcolor(atRetestZone ? color.new(levelColor, 95) : na, title="At Retest Zone")
+
+// ============================================================================
+// SECTION 12: INFO TABLE
+// ============================================================================
+
+if showTable
+    // Create table (11 rows)
+    var table infoTable = table.new(tablePosition, 2, 11, border_width=1)
+    
+    // Header
+    table.cell(infoTable, 0, 0, "Micro CBR v1.2", text_color=color.white, bgcolor=color.new(color.blue, 30), text_size=size.normal)
+    table.cell(infoTable, 1, 0, "", text_color=color.white, bgcolor=color.new(color.blue, 30))
+    
+    // Row 1: Active Pattern
+    patternColor = activePattern == "CBRL" ? color.new(color.green, 70) : activePattern == "CBRS" ? color.new(color.red, 70) : color.new(color.gray, 70)
+    table.cell(infoTable, 0, 1, "Pattern", text_color=color.white, bgcolor=color.new(color.black, 90), text_size=size.small)
+    table.cell(infoTable, 1, 1, activePattern, text_color=color.white, bgcolor=patternColor, text_size=size.small)
+    
+    // Row 2: 1H RISK RATING
+    if enable_1h_risk_display and has_1h_buffer_data
+        risk_display_text = h1_risk_emoji + " " + display_overall_rating
+        risk_tooltip = "Risk rating from 1H buffer system\nReplicates Macro_Patterns v1.2 RETEST phase calculation\n\n🟢 STRONG: >5 ATR/bars buffer\n🟡 MODERATE: 3-5 ATR/bars buffer\n🟠 WEAK: 2-3 ATR/bars buffer\n🔴 FRAGILE: <2 ATR/bars buffer"
+        table.cell(infoTable, 0, 2, "1H Risk", text_color=color.white, bgcolor=color.new(color.gray, 90), text_size=size.small, tooltip=risk_tooltip)
+        table.cell(infoTable, 1, 2, risk_display_text, text_color=color.white, bgcolor=h1_risk_color, text_size=size.small)
+    else
+        table.cell(infoTable, 0, 2, "1H Risk", text_color=color.white, bgcolor=color.new(color.gray, 90), text_size=size.small)
+        table.cell(infoTable, 1, 2, "---", text_color=color.white, bgcolor=color.new(color.gray, 80), text_size=size.small)
+    
+    // Row 3: 1H CRITICAL LEVEL
+    if enable_1h_critical_level and has_1h_buffer_data
+        critical_display_text = "❌ " + str.tostring(display_critical_level, "#.#####") + "\n(" + display_break_source + ")"
+        critical_tooltip = "Pattern invalidation level during RETEST\n\nUse for stop loss placement"
+        table.cell(infoTable, 0, 3, "1H Critical", text_color=color.white, bgcolor=color.new(color.gray, 90), text_size=size.small, tooltip=critical_tooltip)
+        table.cell(infoTable, 1, 3, critical_display_text, text_color=color.white, bgcolor=color.new(color.red, 80), text_size=size.small)
+    else
+        table.cell(infoTable, 0, 3, "1H Critical", text_color=color.white, bgcolor=color.new(color.gray, 90), text_size=size.small)
+        table.cell(infoTable, 1, 3, "---", text_color=color.white, bgcolor=color.new(color.gray, 80), text_size=size.small)
+    
+    // Row 4: Breakout Level
+    table.cell(infoTable, 0, 4, "Breakout Level", text_color=color.white, bgcolor=color.new(color.black, 90), text_size=size.small)
+    table.cell(infoTable, 1, 4, str.tostring(breakoutLevel, "#.####"), text_color=color.white, bgcolor=color.new(color.black, 80), text_size=size.small)
+    
+    // Row 5: Distance to Level
+    distColor = math.abs(distanceToLevelATR) <= retestToleranceATR ? color.new(color.green, 70) : color.new(color.orange, 70)
+    table.cell(infoTable, 0, 5, "Distance (ATR)", text_color=color.white, bgcolor=color.new(color.black, 90), text_size=size.small)
+    table.cell(infoTable, 1, 5, str.tostring(distanceToLevelATR, "#.##") + " ATR", text_color=color.white, bgcolor=distColor, text_size=size.small)
+    
+    // Row 6: At Retest Zone
+    retestColor = atRetestZone ? color.new(color.green, 70) : color.new(color.gray, 70)
+    table.cell(infoTable, 0, 6, "At Retest", text_color=color.white, bgcolor=color.new(color.black, 90), text_size=size.small)
+    table.cell(infoTable, 1, 6, atRetestZone ? "YES" : "NO", text_color=color.white, bgcolor=retestColor, text_size=size.small)
+    
+    // Row 7: Active Trigger
+    triggerColor = validEntry ? color.new(color.green, 50) : color.new(color.gray, 70)
+    triggerDisplay = validEntry ? "TRIGGER " + activeTrigger : "---"
+    table.cell(infoTable, 0, 7, "Entry Signal", text_color=color.white, bgcolor=color.new(color.black, 90), text_size=size.small)
+    table.cell(infoTable, 1, 7, triggerDisplay, text_color=color.white, bgcolor=triggerColor, text_size=size.small)
+    
+    // Row 8: Entry Quality
+    qualColor = qualityRating == "PERFECT" ? color.new(color.green, 50) : qualityRating == "GOOD" ? color.new(color.blue, 50) : qualityRating == "MINIMUM" ? color.new(color.orange, 50) : color.new(color.red, 50)
+    table.cell(infoTable, 0, 8, "Entry Quality", text_color=color.white, bgcolor=color.new(color.black, 90), text_size=size.small)
+    table.cell(infoTable, 1, 8, qualityRating, text_color=color.white, bgcolor=qualColor, text_size=size.small)
+    
+    // Row 9: Range Status
+    rangeColor = rangeOK ? color.new(color.green, 70) : color.new(color.red, 70)
+    rangeDisplay = entryDirection == "LONG" ? str.tostring(100 - upExhaustion, "#") + "% UP" : entryDirection == "SHORT" ? str.tostring(100 - downExhaustion, "#") + "% DN" : "---"
+    table.cell(infoTable, 0, 9, "Range Room", text_color=color.white, bgcolor=color.new(color.black, 90), text_size=size.small)
+    table.cell(infoTable, 1, 9, rangeDisplay, text_color=color.white, bgcolor=rangeColor, text_size=size.small)
+    
+    // Row 10: Session Status
+    sessionColor = sessionOK ? color.new(color.green, 70) : color.new(color.orange, 70)
+    sessionDisplay = inLondonSession ? "LONDON" : inUSSession ? "US" : "OFF-HOURS"
+    table.cell(infoTable, 0, 10, "Session", text_color=color.white, bgcolor=color.new(color.black, 90), text_size=size.small)
+    table.cell(infoTable, 1, 10, sessionDisplay, text_color=color.white, bgcolor=sessionColor, text_size=size.small)
+
+// ============================================================================
+// SECTION 13: ALERTS
+// ============================================================================
+
+// Enhanced alert conditions with trigger identification
+alertcondition(validEntry and entryDirection == "LONG" and triggerA, title="CBRL Trigger A", message="CBRL TRIGGER A: Clean bounce at {{close}}")
+alertcondition(validEntry and entryDirection == "SHORT" and triggerA, title="CBRS Trigger A", message="CBRS TRIGGER A: Clean rejection at {{close}}")
+alertcondition(validEntry and entryDirection == "LONG" and triggerC, title="CBRL Trigger C", message="CBRL TRIGGER C: Compression break at {{close}} | Move={{plot_0}}ATR")
+alertcondition(validEntry and entryDirection == "SHORT" and triggerC, title="CBRS Trigger C", message="CBRS TRIGGER C: Compression break at {{close}} | Move={{plot_0}}ATR")
+alertcondition(atRetestZone, title="Approaching Retest Zone", message="Price approaching retest zone at {{close}}")
+
+// Plot compression move for alert message (hidden)
+plot(triggerC ? trigger_c_move_atr : na, display=display.none, title="Compression Move ATR")
+
+// ============================================================================
+// END OF MICRO CBR v1.2
+// ============================================================================

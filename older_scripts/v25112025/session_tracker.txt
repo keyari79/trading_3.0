@@ -1,0 +1,402 @@
+//@version=6
+indicator("Session Tracker (DST Fixed)", max_lines_count=500, max_boxes_count=500, format=format.price, overlay = true)
+
+// Input parameters - General Settings
+arr_size = input.int(3, "Number of Historical Sessions", minval=1, maxval=10, group="General Settings")
+
+// Input parameters - Line Widths
+current_line_width = input.int(4, "Current Session Line Width", minval=1, maxval=10, group="Line Widths")
+hist_line_width = input.int(2, "Historical Session Line Width", minval=1, maxval=10, group="Line Widths")
+highlight_line_width = input.int(6, "Highlighted Line Width", minval=1, maxval=20, group="Line Widths")
+
+// Input parameters - Colors
+color_hh = input.color(color.green, "Current Session HH Color", group="Colors")
+color_ll = input.color(color.red, "Current Session LL Color", group="Colors")
+
+// Hardcoded color settings
+color_hist_hh = color.new(color.green, 60)
+color_hist_ll = color.new(color.red, 60)
+color_current = color.new(color.gray, 95)
+box_transparency = 70
+
+// Highlight specific price levels
+highlight_level_1 = input.int(0, "Highlight HH Price Level (-1=current, 0=off, 1=most recent, 2=prev session, etc.)", minval=-1, maxval=20, group="Price Level Highlighting")
+highlight_level_2 = input.int(0, "Highlight LL Price Level (-1=current, 0=off, 1=most recent, 2=prev session, etc.)", minval=-1, maxval=20, group="Price Level Highlighting")
+
+// Label settings
+show_labels = input.bool(false, "Show Session Labels", group="Labels")
+label_hh_text = input.string("HH", "HH Label Text", group="Labels")
+label_ll_text = input.string("LL", "LL Label Text", group="Labels")
+label_hh_color = input.color(color.white, "HH Label Background Color", group="Labels")
+label_ll_color = input.color(color.white, "LL Label Background Color", group="Labels")
+label_text_color = input.color(color.black, "Label Text Color", group="Labels")
+
+// Define session times in UTC (24-hour format)
+// These times are in UTC and will work correctly regardless of DST
+// Sessions are non-overlapping for clear separation
+jp_session_time = "0000-0700:23456"  // Japan session: 12:00 AM - 7:00 AM UTC (Tokyo trading hours)
+eu_session_time = "0700-1200:23456"  // EU session: 7:00 AM - 12:00 PM UTC (London/Frankfurt core hours)
+us_session_time = "1200-2000:23456"  // US session: 12:00 PM - 8:00 PM UTC (8:00 AM - 4:00 PM EDT/EST)
+
+// Note: The :23456 excludes Sunday (day 1), trading days Monday-Friday only
+// Sessions flow: Japan -> Europe -> US with no overlap
+// US session starts at 8:00 AM EDT to capture:
+//   - 8:30 AM EDT economic data releases (CPI, NFP, etc.)
+//   - Early NY forex/commodity trading volume
+//   - Pre-market NYSE activity
+// US times: 8:00 AM - 4:00 PM EDT (UTC-4) / 8:00 AM - 4:00 PM EST (UTC-5)
+
+// Hardcoded session box colors with input transparency
+color_hist_us = color.new(color.blue, box_transparency)
+color_hist_jp = color.new(color.black, box_transparency)
+color_hist_eu = color.new(color.yellow, box_transparency)
+
+// ============================================================================
+// SESSION TRACKING
+// ============================================================================
+
+// Define session types
+type us_session
+    float hh
+    float ll
+    int bdx_start
+    int bdx_end
+    int bdx_middle
+    line line_hh = na
+    line line_ll = na
+    box session_box = na
+    label hh_label = na
+    label ll_label = na
+
+type jp_session
+    float hh
+    float ll
+    int bdx_start
+    int bdx_end
+    int bdx_middle
+    line line_hh = na
+    line line_ll = na
+    box session_box = na
+    label hh_label = na
+    label ll_label = na
+
+type eu_session
+    float hh
+    float ll
+    int bdx_start
+    int bdx_end
+    int bdx_middle
+    line line_hh = na
+    line line_ll = na
+    box session_box = na
+    label hh_label = na
+    label ll_label = na
+
+// Initialize arrays for historical sessions
+var array<us_session> arr_us_sessions = array.new<us_session>()
+var array<jp_session> arr_jp_sessions = array.new<jp_session>()
+var array<eu_session> arr_eu_sessions = array.new<eu_session>()
+
+// Track current session data
+var float us_high = na
+var float us_low = na
+var int us_start_idx = na
+var bool in_us_session = false
+var line us_current_hh = na
+var line us_current_ll = na
+var box us_current_box = na
+
+var float jp_high = na
+var float jp_low = na
+var int jp_start_idx = na
+var bool in_jp_session = false
+var line jp_current_hh = na
+var line jp_current_ll = na
+var box jp_current_box = na
+
+var float eu_high = na
+var float eu_low = na
+var int eu_start_idx = na
+var bool in_eu_session = false
+var line eu_current_hh = na
+var line eu_current_ll = na
+var box eu_current_box = na
+
+// Check if current bar is in each session (using UTC timezone which doesn't change)
+is_us = not na(time(timeframe.period, us_session_time, "UTC"))
+is_jp = not na(time(timeframe.period, jp_session_time, "UTC"))
+is_eu = not na(time(timeframe.period, eu_session_time, "UTC"))
+
+// ===================================================================
+// Check for ENDING sessions FIRST before starting new ones
+// ===================================================================
+
+// Check if EU session just ended
+if not is_eu and in_eu_session
+    bdx_mid = math.round((eu_start_idx + bar_index - 1) / 2)
+    new_session = eu_session.new(eu_high, eu_low, eu_start_idx, bar_index - 1, bdx_mid)
+    
+    new_session.line_hh := line.new(eu_start_idx, eu_high, bar_index - 1, eu_high, color=color_hist_hh, width=hist_line_width, style=line.style_solid, force_overlay=true)
+    new_session.line_ll := line.new(eu_start_idx, eu_low, bar_index - 1, eu_low, color=color_hist_ll, width=hist_line_width, style=line.style_solid, force_overlay=true)
+    new_session.session_box := box.new(eu_start_idx, eu_high, bar_index - 1, eu_low, border_color=na, bgcolor=color_hist_eu, force_overlay=true)
+    
+    if show_labels
+        new_session.hh_label := label.new(bdx_mid, eu_high, label_hh_text + "\n" + str.tostring(eu_high, "#.####"), style=label.style_label_down, color=label_hh_color, textcolor=label_text_color, force_overlay=true)
+        new_session.ll_label := label.new(bdx_mid, eu_low, label_ll_text + "\n" + str.tostring(eu_low, "#.####"), style=label.style_label_up, color=label_ll_color, textcolor=label_text_color, force_overlay=true)
+    
+    line.delete(eu_current_hh)
+    line.delete(eu_current_ll)
+    box.delete(eu_current_box)
+    
+    array.push(arr_eu_sessions, new_session)
+    
+    if array.size(arr_eu_sessions) > arr_size
+        old_session = array.shift(arr_eu_sessions)
+        line.delete(old_session.line_hh)
+        line.delete(old_session.line_ll)
+        box.delete(old_session.session_box)
+        label.delete(old_session.hh_label)
+        label.delete(old_session.ll_label)
+    
+    in_eu_session := false
+
+// Check if US session just ended
+if not is_us and in_us_session
+    bdx_mid = math.round((us_start_idx + bar_index - 1) / 2)
+    new_session = us_session.new(us_high, us_low, us_start_idx, bar_index - 1, bdx_mid)
+    
+    new_session.line_hh := line.new(us_start_idx, us_high, bar_index - 1, us_high, color=color_hist_hh, width=hist_line_width, style=line.style_solid, force_overlay=true)
+    new_session.line_ll := line.new(us_start_idx, us_low, bar_index - 1, us_low, color=color_hist_ll, width=hist_line_width, style=line.style_solid, force_overlay=true)
+    new_session.session_box := box.new(us_start_idx, us_high, bar_index - 1, us_low, border_color=na, bgcolor=color_hist_us, force_overlay=true)
+    
+    if show_labels
+        new_session.hh_label := label.new(bdx_mid, us_high, label_hh_text + "\n" + str.tostring(us_high, "#.####"), style=label.style_label_down, color=label_hh_color, textcolor=label_text_color, force_overlay=true)
+        new_session.ll_label := label.new(bdx_mid, us_low, label_ll_text + "\n" + str.tostring(us_low, "#.####"), style=label.style_label_up, color=label_ll_color, textcolor=label_text_color, force_overlay=true)
+    
+    line.delete(us_current_hh)
+    line.delete(us_current_ll)
+    box.delete(us_current_box)
+    
+    array.push(arr_us_sessions, new_session)
+    
+    if array.size(arr_us_sessions) > arr_size
+        old_session = array.shift(arr_us_sessions)
+        line.delete(old_session.line_hh)
+        line.delete(old_session.line_ll)
+        box.delete(old_session.session_box)
+        label.delete(old_session.hh_label)
+        label.delete(old_session.ll_label)
+    
+    in_us_session := false
+
+// Check if JP session just ended
+if not is_jp and in_jp_session
+    bdx_mid = math.round((jp_start_idx + bar_index - 1) / 2)
+    new_session = jp_session.new(jp_high, jp_low, jp_start_idx, bar_index - 1, bdx_mid)
+    
+    new_session.line_hh := line.new(jp_start_idx, jp_high, bar_index - 1, jp_high, color=color_hist_hh, width=hist_line_width, style=line.style_solid, force_overlay=true)
+    new_session.line_ll := line.new(jp_start_idx, jp_low, bar_index - 1, jp_low, color=color_hist_ll, width=hist_line_width, style=line.style_solid, force_overlay=true)
+    new_session.session_box := box.new(jp_start_idx, jp_high, bar_index - 1, jp_low, border_color=na, bgcolor=color_hist_jp, force_overlay=true)
+    
+    if show_labels
+        new_session.hh_label := label.new(bdx_mid, jp_high, label_hh_text + "\n" + str.tostring(jp_high, "#.####"), style=label.style_label_down, color=label_hh_color, textcolor=label_text_color, force_overlay=true)
+        new_session.ll_label := label.new(bdx_mid, jp_low, label_ll_text + "\n" + str.tostring(jp_low, "#.####"), style=label.style_label_up, color=label_ll_color, textcolor=label_text_color, force_overlay=true)
+    
+    line.delete(jp_current_hh)
+    line.delete(jp_current_ll)
+    box.delete(jp_current_box)
+    
+    array.push(arr_jp_sessions, new_session)
+    
+    if array.size(arr_jp_sessions) > arr_size
+        old_session = array.shift(arr_jp_sessions)
+        line.delete(old_session.line_hh)
+        line.delete(old_session.line_ll)
+        box.delete(old_session.session_box)
+        label.delete(old_session.hh_label)
+        label.delete(old_session.ll_label)
+    
+    in_jp_session := false
+
+// ===================================================================
+// NOW check for STARTING sessions
+// ===================================================================
+
+// US Session logic
+if is_us and not in_us_session
+    us_high := high
+    us_low := low
+    us_start_idx := bar_index
+    in_us_session := true
+    
+    us_current_hh := line.new(us_start_idx, us_high, bar_index, us_high, color=color_hh, width=current_line_width, style=line.style_solid, force_overlay=true)
+    us_current_ll := line.new(us_start_idx, us_low, bar_index, us_low, color=color_ll, width=current_line_width, style=line.style_solid, force_overlay=true)
+    us_current_box := box.new(us_start_idx, us_high, bar_index, us_low, border_color=na, bgcolor=color_current, force_overlay=true)
+else if is_us and in_us_session
+    us_high := math.max(us_high, high)
+    us_low := math.min(us_low, low)
+    
+    line.set_y1(us_current_hh, us_high)
+    line.set_y2(us_current_hh, us_high)
+    line.set_x2(us_current_hh, bar_index)
+    
+    line.set_y1(us_current_ll, us_low)
+    line.set_y2(us_current_ll, us_low)
+    line.set_x2(us_current_ll, bar_index)
+    
+    box.set_top(us_current_box, us_high)
+    box.set_bottom(us_current_box, us_low)
+    box.set_right(us_current_box, bar_index)
+
+// JP Session logic
+if is_jp and not in_jp_session
+    jp_high := high
+    jp_low := low
+    jp_start_idx := bar_index
+    in_jp_session := true
+    
+    jp_current_hh := line.new(jp_start_idx, jp_high, bar_index, jp_high, color=color_hh, width=current_line_width, style=line.style_solid, force_overlay=true)
+    jp_current_ll := line.new(jp_start_idx, jp_low, bar_index, jp_low, color=color_ll, width=current_line_width, style=line.style_solid, force_overlay=true)
+    jp_current_box := box.new(jp_start_idx, jp_high, bar_index, jp_low, border_color=na, bgcolor=color_current, force_overlay=true)
+else if is_jp and in_jp_session
+    jp_high := math.max(jp_high, high)
+    jp_low := math.min(jp_low, low)
+    
+    line.set_y1(jp_current_hh, jp_high)
+    line.set_y2(jp_current_hh, jp_high)
+    line.set_x2(jp_current_hh, bar_index)
+    
+    line.set_y1(jp_current_ll, jp_low)
+    line.set_y2(jp_current_ll, jp_low)
+    line.set_x2(jp_current_ll, bar_index)
+    
+    box.set_top(jp_current_box, jp_high)
+    box.set_bottom(jp_current_box, jp_low)
+    box.set_right(jp_current_box, bar_index)
+
+// EU Session logic
+if is_eu and not in_eu_session
+    eu_high := high
+    eu_low := low
+    eu_start_idx := bar_index
+    in_eu_session := true
+    
+    eu_current_hh := line.new(eu_start_idx, eu_high, bar_index, eu_high, color=color_hh, width=current_line_width, style=line.style_solid, force_overlay=true)
+    eu_current_ll := line.new(eu_start_idx, eu_low, bar_index, eu_low, color=color_ll, width=current_line_width, style=line.style_solid, force_overlay=true)
+    eu_current_box := box.new(eu_start_idx, eu_high, bar_index, eu_low, border_color=na, bgcolor=color_current, force_overlay=true)
+else if is_eu and in_eu_session
+    eu_high := math.max(eu_high, high)
+    eu_low := math.min(eu_low, low)
+    
+    line.set_y1(eu_current_hh, eu_high)
+    line.set_y2(eu_current_hh, eu_high)
+    line.set_x2(eu_current_hh, bar_index)
+    
+    line.set_y1(eu_current_ll, eu_low)
+    line.set_y2(eu_current_ll, eu_low)
+    line.set_x2(eu_current_ll, bar_index)
+    
+    box.set_top(eu_current_box, eu_high)
+    box.set_bottom(eu_current_box, eu_low)
+    box.set_right(eu_current_box, bar_index)
+
+// ===================================================================
+// Update highlighted price levels on every bar
+// ===================================================================
+
+updateHighlights() =>
+    var session_order = array.new<string>()
+    var session_hh_lines = array.new<line>()
+    var session_ll_lines = array.new<line>()
+    
+    array.clear(session_order)
+    array.clear(session_hh_lines)
+    array.clear(session_ll_lines)
+    
+    current_session_type = in_eu_session or (not in_us_session and not in_jp_session and is_eu) ? "EU" : 
+                          in_us_session or (not in_jp_session and not in_eu_session and is_us) ? "US" : "JP"
+    
+    var array<string> session_sequence = array.new<string>()
+    if current_session_type == "EU"
+        session_sequence := array.from("JP", "US", "EU", "JP", "US", "EU", "JP", "US", "EU", "JP")
+    else if current_session_type == "US"
+        session_sequence := array.from("EU", "JP", "US", "EU", "JP", "US", "EU", "JP", "US", "EU")
+    else
+        session_sequence := array.from("US", "EU", "JP", "US", "EU", "JP", "US", "EU", "JP", "US")
+    
+    for i = 0 to math.min(9, arr_size * 3 - 1)
+        session_type = array.get(session_sequence, i)
+        
+        if session_type == "US"
+            us_idx = math.floor(i / 3)
+            if us_idx < array.size(arr_us_sessions)
+                us_sess = array.get(arr_us_sessions, array.size(arr_us_sessions) - 1 - us_idx)
+                array.push(session_order, "US")
+                array.push(session_hh_lines, us_sess.line_hh)
+                array.push(session_ll_lines, us_sess.line_ll)
+        else if session_type == "JP"
+            jp_idx = math.floor(i / 3)
+            if jp_idx < array.size(arr_jp_sessions)
+                jp_sess = array.get(arr_jp_sessions, array.size(arr_jp_sessions) - 1 - jp_idx)
+                array.push(session_order, "JP")
+                array.push(session_hh_lines, jp_sess.line_hh)
+                array.push(session_ll_lines, jp_sess.line_ll)
+        else
+            eu_idx = math.floor(i / 3)
+            if eu_idx < array.size(arr_eu_sessions)
+                eu_sess = array.get(arr_eu_sessions, array.size(arr_eu_sessions) - 1 - eu_idx)
+                array.push(session_order, "EU")
+                array.push(session_hh_lines, eu_sess.line_hh)
+                array.push(session_ll_lines, eu_sess.line_ll)
+    
+    if array.size(arr_us_sessions) > 0
+        for i = 0 to array.size(arr_us_sessions) - 1
+            us_sess = array.get(arr_us_sessions, i)
+            if not na(us_sess.line_hh)
+                line.set_width(us_sess.line_hh, hist_line_width)
+            if not na(us_sess.line_ll)
+                line.set_width(us_sess.line_ll, hist_line_width)
+    
+    if array.size(arr_jp_sessions) > 0
+        for i = 0 to array.size(arr_jp_sessions) - 1
+            jp_sess = array.get(arr_jp_sessions, i)
+            if not na(jp_sess.line_hh)
+                line.set_width(jp_sess.line_hh, hist_line_width)
+            if not na(jp_sess.line_ll)
+                line.set_width(jp_sess.line_ll, hist_line_width)
+    
+    if array.size(arr_eu_sessions) > 0
+        for i = 0 to array.size(arr_eu_sessions) - 1
+            eu_sess = array.get(arr_eu_sessions, i)
+            if not na(eu_sess.line_hh)
+                line.set_width(eu_sess.line_hh, hist_line_width)
+            if not na(eu_sess.line_ll)
+                line.set_width(eu_sess.line_ll, hist_line_width)
+    
+    if highlight_level_1 == -1
+        if not na(us_current_hh) and in_us_session
+            line.set_width(us_current_hh, highlight_line_width)
+        if not na(jp_current_hh) and in_jp_session
+            line.set_width(jp_current_hh, highlight_line_width)
+        if not na(eu_current_hh) and in_eu_session
+            line.set_width(eu_current_hh, highlight_line_width)
+    else if highlight_level_1 > 0 and (highlight_level_1 - 1) < array.size(session_hh_lines)
+        hh_line = array.get(session_hh_lines, highlight_level_1 - 1)
+        if not na(hh_line)
+            line.set_width(hh_line, highlight_line_width)
+    
+    if highlight_level_2 == -1
+        if not na(us_current_ll) and in_us_session
+            line.set_width(us_current_ll, highlight_line_width)
+        if not na(jp_current_ll) and in_jp_session
+            line.set_width(jp_current_ll, highlight_line_width)
+        if not na(eu_current_ll) and in_eu_session
+            line.set_width(eu_current_ll, highlight_line_width)
+    else if highlight_level_2 > 0 and (highlight_level_2 - 1) < array.size(session_ll_lines)
+        ll_line = array.get(session_ll_lines, highlight_level_2 - 1)
+        if not na(ll_line)
+            line.set_width(ll_line, highlight_line_width)
+
+updateHighlights()
+
+// Nothing more to display - session tracking only
